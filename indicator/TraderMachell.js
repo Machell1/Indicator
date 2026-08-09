@@ -1351,9 +1351,14 @@ class traderMachell {
       const dump = ["htfSessions", "scaledWidths", "devProfile", "nodes",
         "vaFill", "vaFillColor", "vaFillOpacity", "showHistory", "alignTest", "diag"]
         .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
-      items.push(frameTxt("stat4", 70, 72, "props: " + dump +
-        "   anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
-        " base=" + this.idxBase + " mirror=" + this.tmsList.length,
+      // anchor state FIRST: it is the load-bearing diagnostic and the props
+      // dump is long enough to clip off the right edge of the viewport
+      // (learned live 2026-08-09). i/lastTms pin down the live chart-index
+      // space so an anchor displacement can be measured remotely.
+      items.push(frameTxt("stat4", 70, 72,
+        "anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
+        " i=" + i + " base=" + this.idxBase + " mirror=" + this.tmsList.length +
+        "   props: " + dump,
         COLORS.dim, FONT_SM));
     }
 
