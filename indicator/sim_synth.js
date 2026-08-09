@@ -180,29 +180,51 @@ for (const it of items) {
   }
 }
 
-// -- vertical alignment: prev-profile POC row must straddle the exact POC --
+// -- SVP layer: the current session's box holds the DEVELOPING profile
+// (default devProfile=1); the v4 prev projection must be absent --
 const core = A.inst.core;
 const span = pr => {
   const lo = pr.position.y.v;             // RECT_Y_ANCHOR === 'bottom'
   return [lo, lo + pr.size.height.v];
 };
-const pocRects = rectsOf('pproP');
-check(pocRects.length > 0, 'no POC row in prev profile');
-if (pocRects.length) {
-  const [lo, hi] = span(pocRects[0]);
-  check(lo <= core.prev.poc && core.prev.poc <= hi,
-    `POC row [${lo.toFixed(2)},${hi.toFixed(2)}] misses POC ${core.prev.poc.toFixed(2)}`);
+check(items.every(x => !x.key.startsWith('ppro')),
+  'prev-session projection drawn despite devProfile default');
+// independently recompute the developing profile with the engine's own
+// exports and grid convention -- the drawn dPOC must match EXACTLY
+const { buildProfile } = require('./dale_core.js');
+let dLo = Infinity, dHi = -Infinity;
+for (const b of core.dayBars) {
+  if (b.l < dLo) dLo = b.l;
+  if (b.h > dHi) dHi = b.h;
 }
-const profLo = core.prev.lo;
-let profHi = -Infinity;
-for (const k of core.prev.vol.keys())
-  profHi = Math.max(profHi, core.prev.lo + (k + 1) * core.prev.step);
-for (const k of ['pproM', 'pproV', 'pproP'])
-  for (const pr of rectsOf(k)) {
-    const [lo, hi] = span(pr);
-    check(lo >= profLo - core.prev.step && hi <= profHi + core.prev.step,
-      `prev row [${lo.toFixed(2)},${hi.toFixed(2)}] outside profile span`);
-  }
+const dProf = buildProfile(core.dayBars,
+  Math.max((dHi - dLo) / core.cfg.rows, 1e-9));
+check(!!dProf, 'reference developing profile failed to build');
+const dpocRay = items.find(x => x.key === 'dpocL');
+check(!!dpocRay, 'developing dPOC ray missing');
+if (dpocRay && dProf)
+  check(dpocRay.lines[0].a.y.v === dProf.poc,
+    `dPOC ray ${dpocRay.lines[0].a.y.v} != engine-math POC ${dProf.poc}`);
+for (const k of ['dvahL', 'dvalL'])
+  check(items.some(x => x.key === k), 'developing ray missing: ' + k);
+const dPocRects = rectsOf('dproP');
+check(dPocRects.length > 0, 'no POC row in developing profile');
+if (dPocRects.length && dProf) {
+  const [lo, hi] = span(dPocRects[0]);
+  check(lo <= dProf.poc && dProf.poc <= hi,
+    `dev POC row [${lo.toFixed(2)},${hi.toFixed(2)}] misses POC ${dProf.poc.toFixed(2)}`);
+}
+if (dProf) {
+  let profHi = -Infinity;
+  for (const k of dProf.vol.keys())
+    profHi = Math.max(profHi, dProf.lo + (k + 1) * dProf.step);
+  for (const k of ['dproM', 'dproV', 'dproP'])
+    for (const pr of rectsOf(k)) {
+      const [lo, hi] = span(pr);
+      check(lo >= dProf.lo - dProf.step && hi <= profHi + dProf.step,
+        `dev row [${lo.toFixed(2)},${hi.toFixed(2)}] outside profile span`);
+    }
+}
 
 // -- value-area ZONE: dashed outline (line primitives, never a fill --
 // live 2026-08-09 proved fill alpha is not honored), spans exactly
@@ -302,8 +324,9 @@ if (aln.length) {
     'part2: Text items missing style');
   const lab2 = items2.filter(x => x.tag === 'Text' && !x.origin &&
     x.textAlignment === 'rightMiddle');
-  // 11 clustered labels: PREV POC/VAH/VAL, 2 NPOC, HTF POC/VAH/VAL, LEG, TP, SL
-  check(lab2.length === 11, 'part2: expected 11 labels, got ' + lab2.length);
+  // 14 labels: PREV POC/VAH/VAL, 2 NPOC, HTF POC/VAH/VAL, LEG, TP, SL
+  // + developing dPOC/dVAH/dVAL (SVP layer)
+  check(lab2.length === 14, 'part2: expected 14 labels, got ' + lab2.length);
   const slots2 = new Set();
   let stacked = 0;
   for (const t of lab2) {
@@ -345,6 +368,19 @@ if (aln.length) {
   console.log('part3 px-fallback frame:    ' + it3.length + ' items');
 }
 
+// -- part 3b: devProfile=0 restores the v4 layout (prev projection at the
+// session start, no developing profile/levels). String prop again. --
+{
+  const P = runModel('A', 500, { htfSessions: 20, devProfile: '0' });
+  const it = P.lastResult && P.lastResult.graphics ? P.lastResult.graphics.items : [];
+  check(P.threw === 0, 'part3b: devProfile=0 threw');
+  check(it.some(x => x.key.startsWith('ppro')),
+    'part3b: prev projection missing with devProfile=0');
+  check(it.every(x => !x.key.startsWith('dpro') && x.key !== 'dpocL'),
+    'part3b: developing profile drawn despite devProfile=0');
+  console.log('part3b v4-layout frame:     ' + it.length + ' items');
+}
+
 // -- part 4: prop-coercion torture. Live 2026-08-09 proved prop delivery
 // cannot be trusted (bool values arrived undefined while the dialog showed
 // them). Every representation a platform could plausibly send must gate
@@ -383,6 +419,80 @@ if (aln.length) {
   inst.init();
   check(inst.core.cfg.htfSessions === 20, 'part4: htfSessions garbage not defaulted');
   console.log('part4 prop coercion:        ' + cases.length + ' cases OK');
+}
+
+// -- part 5: HVN/LVN node ticks must satisfy the ENGINE's own criteria --
+// (checked on the pre-part2 frame: `items` and core.prev are consistent)
+{
+  const prof = core.prev;
+  const pocV = prof.vol.get(prof.pocRow) || 0;
+  const rowV = price => {
+    const k = Math.round((price - prof.lo) / prof.step - 0.5);
+    // run centers of even-length runs land on a row boundary; accept the
+    // lower-volume side
+    return Math.min(prof.vol.get(k) || 0, prof.vol.get(k + 1) || 0);
+  };
+  const ndL = items.find(x => x.key === 'ndL');
+  const ndH = items.find(x => x.key === 'ndH');
+  const CFGl = require('./dale_core.js').CFG;
+  if (ndL) {
+    check(ndL.lines.length <= 4, 'part5: too many LVN ticks');
+    for (const ln of ndL.lines)
+      check(rowV(ln.a.y.v) < CFGl.lvnFrac * pocV,
+        'part5: LVN tick at ' + ln.a.y.v.toFixed(2) + ' fails the engine stop criterion');
+  }
+  if (ndH) {
+    check(ndH.lines.length <= 3, 'part5: too many HVN ticks');
+    for (const ln of ndH.lines) {
+      const k = Math.round((ln.a.y.v - prof.lo) / prof.step - 0.5);
+      check((prof.vol.get(k) || 0) >= 0.6 * pocV,
+        'part5: HVN tick at ' + ln.a.y.v.toFixed(2) + ' below 60% of POC volume');
+    }
+  }
+  console.log('part5 node ticks:           ' +
+    (ndL ? ndL.lines.length : 0) + ' LVN, ' + (ndH ? ndH.lines.length : 0) + ' HVN');
+}
+
+// -- part 6: the optional vaFill canvas plotter --
+{
+  const custom = (mod.plotter || []).filter(pl => pl && pl.type === 'custom');
+  check(custom.length === 1, 'part6: expected exactly one custom plotter');
+  const fn = custom.length ? custom[0].fn : null;
+  const draws = [];
+  const canvas = {
+    drawLine: (a, b, style) => draws.push({ a, b, style }),
+    drawPath: () => draws.push({ path: true }),
+  };
+  const mkHist = arr => ({ data: arr, get: i => arr[i] });
+  const hist = mkHist([
+    { __x: 0, vaLo: 100, vaHi: 110 },
+    { __x: 1, vaLo: 100, vaHi: 110 },
+    { __x: 2 },                          // no session data yet: must skip
+  ]);
+  if (fn) {
+    // default off: zero draws
+    fn(canvas, { props: {} }, hist);
+    check(draws.length === 0, 'part6: plotter drew while vaFill off');
+    // on (string prop), custom color, clamped opacity
+    fn(canvas, { props: { vaFill: '1', vaFillColor: '#123456', vaFillOpacity: '250' } }, hist);
+    check(draws.length === 2, 'part6: expected 2 draws, got ' + draws.length);
+    for (const dr of draws) {
+      check(dr.style.opacity > 0 && dr.style.opacity <= 1,
+        'part6: opacity out of range: ' + dr.style.opacity);
+      check(dr.style.color === '#123456', 'part6: color prop not honored');
+      check(dr.a.y === 100 && dr.b.y === 110, 'part6: VA span wrong');
+    }
+    // a throwing history must never propagate (chart safety)
+    let threw6 = false;
+    try { fn(canvas, { props: { vaFill: 1 } }, { data: { length: 1 }, get: () => { throw new Error('x'); } }); }
+    catch (e) { threw6 = true; }
+    check(!threw6, 'part6: plotter exception escaped');
+  }
+  // per-bar map() output must carry the session VA for the plotter
+  check(A.lastResult && A.lastResult.vaLo === core.prev.val &&
+    A.lastResult.vaHi === core.prev.vah,
+    'part6: map() output missing vaLo/vaHi for the plotter');
+  console.log('part6 vaFill plotter:       gating + draws OK');
 }
 
 const kindsOf = c => {

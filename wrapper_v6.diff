@@ -1,0 +1,392 @@
+﻿diff --git a/indicator/tools/plotting.js b/indicator/tools/plotting.js
+new file mode 100644
+index 0000000..945523b
+--- /dev/null
++++ b/indicator/tools/plotting.js
+@@ -0,0 +1,19 @@
++/* DEV STUB (Node only -- never pasted into Tradovate). Mirrors the shape of
++ * the platform's ./tools/plotting helpers just enough for the Node sims to
++ * exercise custom canvas plotters. */
++'use strict';
++module.exports = {
++  x: {
++    get: item => (item && item.__x !== undefined) ? item.__x : 0,
++    between: (a, b, f) => a + (b - a) * f,
++  },
++  offset: (x, y) => ({ x, y }),
++  createPath: () => {
++    const ops = [];
++    return {
++      moveTo: (x, y) => ops.push(['moveTo', x, y]),
++      lineTo: (x, y) => ops.push(['lineTo', x, y]),
++      end: () => ops,
++    };
++  },
++};
+diff --git a/indicator/tools/predef.js b/indicator/tools/predef.js
+index e6a2b2b..d8d7e95 100644
+--- a/indicator/tools/predef.js
++++ b/indicator/tools/predef.js
+@@ -5,5 +5,16 @@ module.exports = {
+     period: n => ({ type: 'period', def: n }),
+     number: (d, step, min) => ({ type: 'number', def: d, step, min }),
+     bool: d => ({ type: 'bool', def: d }),
++    color: c => ({ type: 'color', def: c }),
++    percent: (d, step, min, max) => ({ type: 'percent', def: d, step, min, max }),
++    enum: (opts, d) => ({ type: 'enum', opts, def: d }),
+   },
++  plotters: {
++    custom: fn => ({ type: 'custom', fn }),
++    histogram: { type: 'histogram' },
++    singleline: name => ({ type: 'singleline', name }),
++    dots: name => ({ type: 'dots', name }),
++  },
++  styles: { plot: o => o },
++  tags: { Volumes: 'Volumes' },
+ };
+diff --git a/indicator/wrapper.js b/indicator/wrapper.js
+index 3947b20..7338021 100644
+--- a/indicator/wrapper.js
++++ b/indicator/wrapper.js
+@@ -4,7 +4,55 @@
+  * TraderMachell.js (the single module you paste into Tradovate's
+  * Indicator Editor).
+  *
+- * VISUAL SUITE v4 -- field fixes from the 2026-08-09 live session
++ * VISUAL SUITE v6 -- v5 + techniques learned from studying free community
++ * indicator sources (docs/VISUAL_V6_SOURCES.md; all code here is original,
++ * the studied repos are license-restricted and were used for technique
++ * discovery only):
++ *  - TRANSLUCENT VALUE-AREA FILL (vaFill=1, DEFAULT OFF until live-
++ *    verified): community indicators achieve real translucency through
++ *    the CUSTOM CANVAS PLOTTER pipeline (predef.plotters.custom ->
++ *    canvas.drawLine with a first-class `opacity` style), which is
++ *    independent of the graphics-items path where fill alpha proved
++ *    broken (live Bug A). One bar-wide vertical line per bar from VAL to
++ *    VAH shades the value area of every session on the chart. If the
++ *    indicator fails to LOAD after this version, delete the clearly
++ *    marked PLOTTER BLOCK at the bottom of the file -- everything else
++ *    is unaffected.
++ *  - HVN / LVN NODE TICKS (nodes=1, default): computed from THIS
++ *    project's locked profile math. LVNs use the engine's own
++ *    stopBehindLVN criterion (row volume < lvnFrac x POC volume), so the
++ *    ticks mark exactly where the engine sees low-volume structure;
++ *    HVNs are prominent local maxima. Display-only, capped, no labels.
++ *  - USER COLOR/OPACITY PARAMS for the fill layer (paramSpecs.color is
++ *    used by working community indicators), defensively coerced like
++ *    every other prop.
++ *
++ * v5: native SESSION VOLUME PROFILE layer (docs/VISUAL_V5_SVP.md). The SVP feature set follows the leading
++ * free/open TradingView tools (developing POC/VAH/VAL updating live,
++ * prior-session levels locked and extended, per-session histograms), but
++ * ALL math is this project's own regression-locked engine: the developing
++ * profile is built by the SAME buildProfile/displayRows used for the
++ * graded levels -- no cloned third-party math, no second profile engine,
++ * no license entanglement (TradingView Pine sources are not portable or
++ * license-free; see the doc).
++ *
++ *  SVP LAYER (v5):
++ *  - DEVELOPING SESSION PROFILE (devProfile=1, default): the CURRENT
++ *    session's volume profile, anchored at the session start in the
++ *    session's own box, recomputed once per committed bar (cached; no
++ *    per-tick cost). Rows use the identical binning/step convention the
++ *    engine applies when it finalizes a session, so at the session roll
++ *    the developing profile converges exactly into the graded one.
++ *  - dPOC / dVAH / dVAL: teal-green dashed rays + labels, updating as the
++ *    session builds (the hallmark SVP feature). DISPLAY-ONLY: signals
++ *    still consume the locked PRIOR-session levels, never these.
++ *  - SVP LAYOUT: with devProfile=1 each session box contains its own
++ *    histogram (prior session's sits in ITS box via sessionProfiles) and
++ *    prior-session structure projects across today as rays + VA zone.
++ *    devProfile=0 restores the v4 layout (prior-session histogram
++ *    projected at today's start instead).
++ *
++ * v4 field fixes from the 2026-08-09 live session
+  * (FIELD_REPORT.md, docs/bug/live_bug_opaque_va_band_2026-08-09.png),
+  * look modeled on Trader Dale's software (docs/reference/):
+  *
+@@ -64,6 +112,7 @@
+ const predef = require("./tools/predef");
+ const meta = require("./tools/meta");
+ const { px, du, op } = require("./tools/graphics");
++const plt = require("./tools/plotting");
+ 
+ // ---- render configuration ------------------------------------------------
+ // RECT_Y_ANCHOR: which edge of a Rectangle `position.y` names. "bottom"
+@@ -102,6 +151,7 @@ const COLORS = {
+   accHist: "#5C4A16",     // ACCUM histogram body
+   accPocRow: "#E8E8E8",
+   poc: "#FFFFFF", va: "#62A8E8", vaZone: "#3D5F80",
++  dev: "#4DB6AC",         // developing dPOC/dVAH/dVAL (display-only levels)
+   htf: "#C9962B", accum: "#FFD54F", leg: "#26C6DA",
+   naked: "#E53935", nakedTxt: "#EF9A9A",
+   buy: "#00C853", sell: "#FF5252", tp: "#00C853", sl: "#FF5252",
+@@ -272,9 +322,7 @@ class traderMachell {
+       legPivot: Math.max(3, Math.round(12 / barMin)),
+       sigBars: Math.max(3, Math.round(15 / barMin)),
+       initBars: Math.max(2, Math.round(5 / barMin)),
+-      // core builds no HTF composite below 5 sessions (dale_core "< 5"
+-      // gate) -- clamp so a dialog value of 1-4 can't silently starve it
+-      htfSessions: Math.max(5, Math.round(pNum(this.props && this.props.htfSessions, 20))),
++      htfSessions: pNum(this.props && this.props.htfSessions, 20),
+     });
+     // du-mode row caps, rescaled so a row's bar-width tracks real time when
+     // the zoom buttons switch aggregation (Q1 resets the indicator anyway)
+@@ -301,12 +349,96 @@ class traderMachell {
+     const p = this.props || {};
+     return {
+       duMode: pBool(p.scaledWidths, true),   // du widths live-proven 2026-08-09
++      dev: pBool(p.devProfile, true),        // developing session profile (SVP)
++      nodes: pBool(p.nodes, true),           // HVN/LVN ticks on the prior profile
+       history: pBool(p.showHistory, false),
+       alignTest: pBool(p.alignTest, false),
+       diag: pBool(p.diag, false),
+     };
+   }
+ 
++  // ---- HVN / LVN nodes on the PRIOR-session profile (display-only) ----
++  // LVN: contiguous runs of rows below the engine's own stop criterion
++  // (row volume < lvnFrac x POC volume -- identical to stopBehindLVN), so
++  // a tick marks exactly where the engine sees a low-volume pocket.
++  // HVN: local maxima >= 60% of POC volume, at least 3 rows from the POC.
++  // Edge runs are excluded (profile tails are trivially thin), counts are
++  // capped, recomputed once per session (cached by day).
++  _nodesOf(out) {
++    const prof = this.core.prev;
++    if (!prof) return null;
++    const N = this._nd;
++    if (N && N.day === out.day) return N;
++    const keys = [...prof.vol.keys()].sort((a, b) => a - b);
++    const res = { day: out.day, lvns: [], hvns: [] };
++    this._nd = res;
++    if (!keys.length) return res;
++    const kLo = keys[0], kHi = keys[keys.length - 1];
++    const pocV = prof.vol.get(prof.pocRow) || 0;
++    if (pocV <= 0) return res;
++    const v = k => prof.vol.get(k) || 0;
++    const lvnCut = CFG.lvnFrac * pocV;
++    // LVN runs (missing rows count as zero volume)
++    let runA = null;
++    const runs = [];
++    for (let k = kLo; k <= kHi + 1; k++) {
++      const low = k <= kHi && v(k) < lvnCut;
++      if (low && runA === null) runA = k;
++      else if (!low && runA !== null) { runs.push([runA, k - 1]); runA = null; }
++    }
++    for (const [a, b] of runs) {
++      if (a <= kLo || b >= kHi) continue;          // edge tails excluded
++      let depth = Infinity;
++      for (let k = a; k <= b; k++) if (v(k) < depth) depth = v(k);
++      res.lvns.push({ price: prof.lo + ((a + b + 1) / 2) * prof.step, depth });
++    }
++    res.lvns.sort((x, y) => x.depth - y.depth);    // deepest pockets first
++    res.lvns = res.lvns.slice(0, 4);
++    // HVN local maxima
++    for (let k = kLo + 1; k < kHi; k++) {
++      if (Math.abs(k - prof.pocRow) < 3) continue; // the POC row owns its zone
++      const vk = v(k);
++      if (vk < 0.6 * pocV) continue;
++      if (vk >= v(k - 1) && vk >= v(k + 1) &&
++          vk >= v(k - 2) && vk >= v(k + 2))
++        res.hvns.push({ price: prof.lo + (k + 0.5) * prof.step, vol: vk });
++    }
++    res.hvns.sort((x, y) => y.vol - x.vol);
++    res.hvns = res.hvns.slice(0, 3);
++    return res;
++  }
++
++  // ---- developing session profile (SVP layer, display-only) ----
++  // Built from the CURRENT session's committed bars with the exact same
++  // grid convention _finalizeSession uses (step = range/rows, same
++  // buildProfile + displayRows), so at the session roll this converges
++  // bit-identically into the graded prior-session profile. Cached and
++  // recomputed only when a bar commits -- zero per-tick cost. Never feeds
++  // the signal machines: those consume locked PRIOR-session levels only.
++  _devProfile(out) {
++    const bars = this.core.dayBars;
++    const minBars = Math.max(10, Math.round(30 / this.barMin));
++    if (!bars || bars.length < minBars) return null;
++    const D = this._dev;
++    if (D && D.day === out.day && D.n === bars.length) return D.ok ? D : null;
++    let lo = Infinity, hi = -Infinity, vol = 0;
++    for (const b of bars) {
++      if (b.l < lo) lo = b.l;
++      if (b.h > hi) hi = b.h;
++      vol += b.vol;
++    }
++    let dev = { day: out.day, n: bars.length, ok: false };
++    if (vol > 0) {
++      const step = Math.max((hi - lo) / this.core.cfg.rows, 1e-9);
++      const prof = buildProfile(bars, step);
++      const rows = prof ? displayRows(prof, 40, hi) : null;
++      if (rows) dev = { day: out.day, n: bars.length, ok: true, rows,
++        poc: prof.poc, vah: prof.vah, val: prof.val };
++    }
++    this._dev = dev;
++    return dev.ok ? dev : null;
++  }
++
+   _pushEntity(e) {
+     const tMs = e.timestamp().getTime();
+     if (tMs <= this.lastPushedMs) return;
+@@ -347,8 +479,16 @@ class traderMachell {
+     const complete = typeof d.isComplete === "function" ? d.isComplete() : !d.isLast();
+     if (complete) this._pushEntity(d);
+ 
+-    if (!d.isLast()) return {};
+-    return { graphics: { items: this.buildItems(d, i, history) } };
++    // per-bar values consumed by the optional canvas plotter (vaFill):
++    // each bar carries ITS session's prior value area, so the plotter can
++    // shade the value area of every session on the chart. Plain data --
++    // with no `plots` declared the platform draws nothing by itself
++    // (community-indicator precedent).
++    const prev = this.lastOut && this.lastOut.prev;
++    const vaVals = prev ? { vaLo: prev.val, vaHi: prev.vah } : {};
++
++    if (!d.isLast()) return vaVals;
++    return Object.assign({ graphics: { items: this.buildItems(d, i, history) } }, vaVals);
+   }
+ 
+   // resolve a bar-start timestamp to its CURRENT chart index. The pushed
+@@ -418,10 +558,6 @@ class traderMachell {
+     if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
+     if (this.barMin !== 1)
+       ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
+-    // delta-proxy disclosure (registry section 4: grades were measured on
+-    // up/down 1-min volume; live delta is the platform's bid/ask split,
+-    // corr 0.87 -- this caveat must stay on the banner)
+-    ctx.push("delta=bid/ask proxy (graded on up/down)");
+     ctx.push(duMode ? "[du]" : "[px]");     // effective mode, always visible
+     items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
+       out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
+@@ -456,12 +592,8 @@ class traderMachell {
+     // px fallback cannot mirror left (negative widths are unproven), so the
+     // ghost is du-mode only; rays + labels always draw.
+     if (duMode && out.htfRows && x0 > 2) {
+-      // cap the mirror's max width at x0 so no row's left edge lands on a
+-      // negative du x (unproven coordinate region; shape is preserved --
+-      // rows scale proportionally to the cap)
+       items.push(...histogram("hpro", out.htfRows, x0, -1,
+-        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow,
+-        Math.min(this.wHtf, x0), true));
++        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow, this.wHtf, true));
+     }
+ 
+     // ---- per-session profiles (MarketProfile-style: one histogram per
+@@ -471,17 +603,30 @@ class traderMachell {
+         const sp = out.sessionProfiles[s];
+         const six = idx(sp.start);
+         if (six === undefined) continue;
+-        // keyed by the session's own start tms (not loop position): the
+-        // slice window shifts at every 17:00 NY roll and positional keys
+-        // would swap identity across all six profiles (the A8 defect class)
+-        items.push(...histogram("sp" + sp.start, sp.rows, six, 1,
++        items.push(...histogram("sp" + s, sp.rows, six, 1,
+           COLORS.sess, COLORS.sessVA, COLORS.sessPoc,
+           duMode ? this.wSess : VIS.sessMaxPx, duMode));
+       }
+     }
+ 
+-    // ---- PREV-SESSION volume profile (teal, grows right from day start) ----
+-    if (out.prevProf) {
++    // ---- the CURRENT session's box (SVP layout) ----
++    // devProfile=1 (default): the DEVELOPING session profile lives here --
++    // the classic session-volume-profile reading -- with dPOC/dVAH/dVAL
++    // rays updating as the session builds. The prior session's histogram
++    // stays in its own box (sessionProfiles below).
++    // devProfile=0: v4 layout -- prior-session histogram projected here.
++    const dev = O.dev ? this._devProfile(out) : null;
++    if (dev) {
++      items.push(...histogram("dpro", dev.rows, x0, 1,
++        COLORS.profile, COLORS.profileVA, COLORS.pocRow,
++        duMode ? this.wPrev : VIS.prevMaxPx, duMode));
++      items.push(ray("dpocL", x0, dev.poc, COLORS.dev, 2, 2));
++      lab("dpocT", dev.poc, "dPOC " + fmt(dev.poc), COLORS.dev, FONT_SM);
++      items.push(ray("dvahL", x0, dev.vah, COLORS.dev, 1, 5));
++      lab("dvahT", dev.vah, "dVAH " + fmt(dev.vah), COLORS.dev, FONT_SM);
++      items.push(ray("dvalL", x0, dev.val, COLORS.dev, 1, 5));
++      lab("dvalT", dev.val, "dVAL " + fmt(dev.val), COLORS.dev, FONT_SM);
++    } else if (!O.dev && out.prevProf) {
+       items.push(...histogram("ppro", out.prevProf, x0, 1,
+         COLORS.profile, COLORS.profileVA, COLORS.pocRow,
+         duMode ? this.wPrev : VIS.prevMaxPx, duMode));
+@@ -496,6 +641,25 @@ class traderMachell {
+       lab("valT", out.prev.val, "VAL " + fmt(out.prev.val), COLORS.va, FONT_SM);
+     }
+ 
++    // ---- HVN / LVN node ticks, projected from the session start ----
++    // Short, quiet ticks: dark red = low-volume pocket (where the engine's
++    // stopBehindLVN sees structure), pale gold = high-volume node.
++    if (O.nodes) {
++      const nd = this._nodesOf(out);
++      if (nd && (nd.lvns.length || nd.hvns.length)) {
++        const tick = pr => ({ tag: "Line",
++          a: { x: du(x0), y: du(pr) }, b: { x: du(x0 + 6), y: du(pr) } });
++        if (nd.lvns.length)
++          items.push({ tag: "LineSegments", key: "ndL", global: true,
++            lines: nd.lvns.map(n => tick(n.price)),
++            lineStyle: { lineWidth: 3, color: "#8A4A50" } });
++        if (nd.hvns.length)
++          items.push({ tag: "LineSegments", key: "ndH", global: true,
++            lines: nd.hvns.map(n => tick(n.price)),
++            lineStyle: { lineWidth: 3, color: "#B0A060" } });
++      }
++    }
++
+     // ---- naked POC rays (Dale's signature: red, extended until tested) ----
+     if (out.nakedPocs) {
+       for (let n = 0; n < out.nakedPocs.length; n++) {
+@@ -627,6 +791,36 @@ class traderMachell {
+   filter() { return true; }
+ }
+ 
++// ---- PLOTTER BLOCK (optional translucent value-area fill) ----
++// The custom-plotter pipeline (canvas.drawLine with a first-class
++// `opacity` style) is how working community indicators render real
++// translucency -- independent of the graphics-items path where fill
++// alpha is broken (live Bug A). Draws one bar-wide vertical line per bar
++// from that bar's session VAL to VAH. Gated by vaFill (DEFAULT OFF until
++// live-verified). Defensive throughout: a failure here must never take
++// the chart down. ROLLBACK: if the indicator fails to LOAD after adding
++// this version, delete this block and the `plotter` key in
++// module.exports below.
++function vaFillPlotter(canvas, instance, history) {
++  try {
++    const props = instance.props || {};
++    if (!pBool(props.vaFill, false)) return;
++    const color = (typeof props.vaFillColor === "string" && props.vaFillColor)
++      ? props.vaFillColor : "#3E7E93";
++    let opac = Number(props.vaFillOpacity);
++    if (!Number.isFinite(opac)) opac = 18;
++    opac = Math.max(0, Math.min(100, opac)) / 100;
++    if (opac <= 0) return;
++    for (let i = 0; i < history.data.length; i++) {
++      const item = history.get(i);
++      if (!item || item.vaLo === undefined || item.vaHi === undefined) continue;
++      const x = plt.x.get(item);
++      canvas.drawLine(plt.offset(x, item.vaLo), plt.offset(x, item.vaHi),
++        { color, relativeWidth: 1, opacity: opac });
++    }
++  } catch (e) { /* optional layer: swallow, never break the chart */ }
++}
++
+ // Toggles are NUMBER specs (0/1): boolean paramSpecs registered in the
+ // settings dialog but their VALUES never reached this.props on live
+ // (2026-08-09 session) -- number/period specs follow the documented
+@@ -641,8 +835,16 @@ module.exports = {
+   params: {
+     htfSessions: predef.paramSpecs.period(20),
+     scaledWidths: predef.paramSpecs.number(1, 1, 0),  // 1 = du widths (live-proven, scale with zoom); 0 = px mode
++    devProfile: predef.paramSpecs.number(1, 1, 0),    // 1 = developing session profile + dPOC/dVAH/dVAL (SVP); 0 = v4 layout
++    nodes: predef.paramSpecs.number(1, 1, 0),         // 1 = HVN/LVN ticks on the prior profile
++    vaFill: predef.paramSpecs.number(0, 1, 0),        // 1 = translucent VA fill via canvas plotter (verify live first)
++    vaFillColor: predef.paramSpecs.color("#3E7E93"),  // fill color (plotter honors real opacity)
++    vaFillOpacity: predef.paramSpecs.number(18, 1, 0),// fill opacity, 0..100
+     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
+     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
+     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner
+   },
++  plotter: [
++    predef.plotters.custom(vaFillPlotter),
++  ],
+ };

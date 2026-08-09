@@ -53,3 +53,28 @@ the invariants enforce what VISUAL_V4.md says they enforce:
 Also noted during review (documentation): `docs/VISUAL_V4.md` claims the
 11-case prop torture and hex enforcement — both exist, but with the
 coverage caveats above.
+
+---
+
+## Addendum after the v5/v6 review (2026-08-09)
+
+**Process regression to avoid repeating:** the v5 commit was authored on a
+pre-fix copy of wrapper.js — it silently REVERTED all four applied fixes
+above (they are re-applied in the v6 merge) and deleted this document.
+Please branch from current main, not from a local copy of your last PR.
+
+**All five sim-hardening follow-ups above are still open** (verified by
+mutation against the v6 tree). Two new ones from the v6 review:
+- part5 LVN/HVN invariant is near-vacuous: an empty tick set passes, and a
+  tick up to 10 rows from a qualifying shelf still passes.
+- VISUAL_V5_SVP.md promises the developing profile after ~10 bars; the code
+  gate is 30 bars on 1-min. Align doc or code.
+
+**Fixed on top of v6 in the merge (see commit):** guarded the three
+load-time surfaces of the vaFill feature (tools/plotting require,
+paramSpecs.color, plotters.custom) so a missing API degrades to "no vaFill"
+instead of "no indicator"; per-bar vaLo/vaHi now resolved from each bar's
+OWN sessionKey instead of lastOut (wrong-session stamping under model A
+re-maps / model B first-of-session); plotter walk capped at 20k bars per
+frame; diag dump extended to all v5/v6 params; developing-profile POC row
+recolored from graded gold to the dev teal-green (evidence-honesty).
