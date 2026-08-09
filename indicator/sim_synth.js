@@ -717,6 +717,59 @@ if (aln.length) {
     ' session profiles exact, desync flagged, overshoot guard OK');
 }
 
+// -- part 9: wrong-but-in-range anchors (live field report section 5).
+// 9a: levels whose timestamps PREDATE the loaded history (bars-to-load
+// 3000 vs a Thursday rotation) must anchor at the chart LEFT edge with
+// the offscreen marker -- never near x0/the live edge, which fabricated
+// the gold ACCUM ray at the session start on live. 9b: an in-range stale
+// resolution must raise [anchor mismatch: <layers>] with names. --
+{
+  // 9a: fabricate an ACCUM window + naked POC born before the mirror
+  const inst = A.inst;               // parts 7c already trimmed its mirror;
+  const t0 = inst.tmsList[0];        // still valid: entries are the tail
+  const iLast = n - 1;
+  const out9 = inst.lastOut;
+  const mirrorMid = inst.tmsList[Math.floor(inst.tmsList.length / 2)];
+  out9.accum = { level: out9.prev.poc + 1, short: false,
+    start: t0 - 3600e3,              // one hour before loaded history
+    end: mirrorMid, winHi: out9.prev.poc + 2, winLo: out9.prev.poc - 1,
+    rows: null };
+  out9.nakedPocs = [{ poc: out9.prev.poc + 3, endTms: t0 - 7200e3 }];
+  const items9 = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  const accL9 = items9.find(x => x.key === 'accL');
+  check(!!accL9 && accL9.lines[0].a.x.v === 0,
+    'part9a: pre-history ACCUM ray not anchored at the chart edge: ' +
+    (accL9 ? accL9.lines[0].a.x.v : 'missing'));
+  check(items9.every(x => x.key !== 'accB' && !x.key.startsWith('apro')),
+    'part9a: ACCUM box/histogram drawn with an unresolvable start');
+  const nk9 = items9.find(x => x.key.startsWith('nk'));
+  check(!!nk9 && nk9.lines[0].a.x.v === 0,
+    'part9a: pre-history naked ray not anchored at the chart edge');
+  const s39 = items9.find(x => x.key === 'stat3');
+  check(s39 && s39.text.indexOf('[old anchors offscreen') >= 0,
+    'part9a: offscreen marker missing');
+  check(s39 && s39.text.indexOf('[anchor mismatch') < 0,
+    'part9a: false mismatch flag');
+
+  // 9b: gapped mode with a uniformly stale stored frame IN RANGE (the
+  // guard-invisible class): items keep drawing per the trust hierarchy,
+  // but the mismatch cross-check must name the divergent layers.
+  inst.mirrorGapped = true;
+  inst.idxList = inst.idxList.map(v => v - 40);   // stale by 40, stays in range
+  const items9b = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  const s39b = items9b.find(x => x.key === 'stat3');
+  check(s39b && s39b.text.indexOf('[anchor mismatch:') >= 0,
+    'part9b: mismatch marker missing');
+  // (this instance's mirror head was trimmed by part 7c, so the session
+  // start is "unresolved" rather than mismatched -- the layers that DO
+  // resolve through the stale frame must be named)
+  check(s39b && /\[anchor mismatch: [a-z,?]*accum/.test(s39b.text),
+    'part9b: divergent layer names missing: ' + (s39b ? s39b.text : ''));
+  check(s39b && s39b.text.indexOf('[mirror desync]') >= 0,
+    'part9b: desync flag missing alongside mismatch');
+  console.log('part9 in-range anchors:     offscreen edge-anchor + mismatch naming OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

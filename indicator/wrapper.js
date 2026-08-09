@@ -593,6 +593,22 @@ class traderMachell {
     return res;
   }
 
+  // independent pure tail-offset reference for the mismatch cross-check:
+  // no trust selection, no base, no stored indexes -- just the entry's
+  // position in the mirror counted from the newest entry.
+  _tailRef(tMs, endIdx) {
+    const L = this.tmsList;
+    if (!L.length || tMs < L[0]) return undefined;
+    let lo = 0, hi = L.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (L[mid] < tMs) lo = mid + 1; else hi = mid;
+    }
+    if (L[lo] !== tMs) return undefined;
+    const r = endIdx - (L.length - 1 - lo);
+    return r < 0 ? undefined : r;
+  }
+
   buildItems(d, i, history) {
     const items = [];
     const out = this.lastOut;
@@ -610,7 +626,34 @@ class traderMachell {
     const endIdx = this.lastPushedMs === d.timestamp().getTime() ? i : i - 1;
     this._desync = false;
     this._overshoot = false;
-    const idx = t => this._idxOf(t, endIdx, tcache);
+    // per-layer anchor-vs-timestamp cross-check (live field report section
+    // 5): every consumer resolves through idx(t, layer); the resolved
+    // anchor is compared against an INDEPENDENT pure tail-offset reference
+    // for the same timestamp. Divergence beyond 1 bar means some path is
+    // consuming a stale or fabricated index -- the layer name lands in
+    // [anchor mismatch: ...] on the banner. This catches wrongness
+    // anywhere IN RANGE, which the overshoot guard cannot see.
+    const mism = new Set();
+    let offscreen = false;
+    const idx = (t, layer) => {
+      const r = this._idxOf(t, endIdx, tcache);
+      if (r !== undefined) {
+        const ref = this._tailRef(t, endIdx);
+        if (ref !== undefined && Math.abs(r - ref) > 1) mism.add(layer || "?");
+      }
+      return r;
+    };
+    // honest anchor for levels born BEFORE the loaded history: an old
+    // level truthfully extends from off-screen left, so its ray anchors
+    // at the chart edge (0). It must NEVER be pinned near x0 / the live
+    // edge -- that fabricates a plausible-looking wrong anchor, invisible
+    // to every guard (the live 2026-08-09 evening frame).
+    const oldAnchor = (t, layer) => {
+      const r = idx(t, layer);
+      if (r !== undefined) return r;
+      if (this.tmsList.length && t < this.tmsList[0]) offscreen = true;
+      return 0;
+    };
     // OCCLUSION RULE (live 2026-08-09 afternoon frame): a histogram may
     // never be placed relative to the LAST bar and may never paint over
     // the live edge. If the session-start anchor cannot be resolved,
@@ -618,7 +661,7 @@ class traderMachell {
     // are horizontal and thin) and the banner says why. When resolved,
     // right-growing session histograms are width-capped so they stop
     // short of the final candles.
-    const x0 = idx(out.dayStartTms);
+    const x0 = idx(out.dayStartTms, "day");
     const x0Ok = x0 !== undefined;
     const rayX0 = x0Ok ? x0 : 0;            // levels anchor at the chart edge
     const availBars = x0Ok ? (i - x0 - 12) : 0;
@@ -671,7 +714,7 @@ class traderMachell {
     if (out.sessionProfiles) {
       for (let s = 0; s < out.sessionProfiles.length; s++) {
         const sp = out.sessionProfiles[s];
-        const six = idx(sp.start);
+        const six = idx(sp.start, "sp");
         if (six === undefined) continue;
         // keyed by the session's own start tms (not loop position): the
         // slice window shifts at every 17:00 NY roll and positional keys
@@ -742,10 +785,9 @@ class traderMachell {
       for (let n = 0; n < out.nakedPocs.length; n++) {
         const np = out.nakedPocs[n];
         if (out.prev && Math.abs(np.poc - out.prev.poc) < 1e-9) continue; // white ray owns it
-        const ix = idx(np.endTms);
         // keyed by session end time, not list position: entries shift as
         // rays get tested, and positional keys would swap identities
-        items.push(ray("nk" + np.endTms, ix !== undefined ? ix : Math.max(0, rayX0 - 200),
+        items.push(ray("nk" + np.endTms, oldAnchor(np.endTms, "npoc"),
           np.poc, COLORS.naked, 1, 1));
         lab("nkT" + np.endTms, np.poc, "NPOC " + fmt(np.poc), COLORS.nakedTxt, FONT_SM);
       }
@@ -764,8 +806,8 @@ class traderMachell {
 
     // ---- ACCUM rotation: box + histogram + level ray ----
     if (out.accum) {
-      const ia = idx(out.accum.start);
-      const ib = idx(out.accum.end);
+      const ia = idx(out.accum.start, "accum");
+      const ib = idx(out.accum.end, "accum");
       if (ia !== undefined && ib !== undefined && out.accum.winHi) {
         items.push(box("accB", ia, ib, out.accum.winHi, out.accum.winLo, COLORS.accum));
         if (out.accum.rows) {
@@ -774,7 +816,11 @@ class traderMachell {
             COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
         }
       }
-      items.push(ray("accL", ia !== undefined ? ia : rayX0, out.accum.level, COLORS.accum, 2, 1));
+      // NEVER pin the ACCUM level at x0 when its window predates loaded
+      // history (live 2026-08-09 evening: gold ray fabricated at the
+      // session start) -- an old level honestly extends from the left edge
+      items.push(ray("accL", ia !== undefined ? ia : oldAnchor(out.accum.start, "accum"),
+        out.accum.level, COLORS.accum, 2, 1));
       lab("accT", out.accum.level,
         "ACCUM " + fmt(out.accum.level) +
         (out.accum.short ? "  SELL retest" : "  BUY retest") +
@@ -797,7 +843,7 @@ class traderMachell {
     let lastSig = null, lastSigIdx, lastAbsorb = null, lastAbsorbIdx;
     for (let m = 0; m < this.marks.length; m++) {
       const mk = this.marks[m];
-      const mi = idx(mk.tMs);
+      const mi = idx(mk.tMs, "mark");
       if (mi === undefined) continue;
       const ev = mk.ev;
       const today = mk.day === out.day;
@@ -889,6 +935,8 @@ class traderMachell {
       ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
     if (!x0Ok) ctx.push("[anchor unresolved - profiles hidden]");
     if (this._overshoot) ctx.push("[anchor overshoot]");
+    if (mism.size) ctx.push("[anchor mismatch: " + [...mism].sort().join(",") + "]");
+    if (offscreen) ctx.push("[old anchors offscreen - load more bars]");
     if (this._desync) ctx.push("[mirror desync]");
     // delta-proxy disclosure (registry section 4: grades were measured on
     // up/down 1-min volume; live delta is the platform's bid/ask split,
@@ -908,11 +956,21 @@ class traderMachell {
       // dump is long enough to clip off the right edge of the viewport
       // (learned live 2026-08-09). i/gap/desync pin down the live
       // chart-index space so a displacement can be measured remotely.
+      // acc=<start>..<end> in bars-back-from-now ("pre" = older than the
+      // loaded history): separates "wrong anchor for an old window" from
+      // "the engine detected a recent window" in one reading
+      const age = t => {
+        const r = this._tailRef(t, endIdx);
+        return r === undefined
+          ? (this.tmsList.length && t < this.tmsList[0] ? "pre" : "?")
+          : String(endIdx - r);
+      };
       items.push(frameTxt("stat4", 70, 72,
         "anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
         " i=" + i + " base=" + this.idxBase + " mirror=" + this.tmsList.length +
         " gap=" + (this.mirrorGapped ? 1 : 0) +
         " desync=" + (this._desync ? 1 : 0) +
+        (out.accum ? " acc=" + age(out.accum.start) + ".." + age(out.accum.end) : "") +
         "   props: " + dump,
         COLORS.dim, FONT_SM));
     }
