@@ -770,6 +770,79 @@ if (aln.length) {
   console.log('part9 in-range anchors:     offscreen edge-anchor + mismatch naming OK');
 }
 
+// -- part 10: emitted-geometry invariant + section-6 audit guards. The
+// live report's lens: nothing may render in the future grid no matter
+// where an x came from; ACCUM windows must be non-inverted; histograms
+// ending near the live edge must cap; far-left windows self-describe. --
+{
+  const R10 = runModel('A', 500);
+  const inst = R10.inst;
+  const iLast = n - 1;
+  const L10 = inst.tmsList;
+  const frame = () => inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  const mkAcc = (sIdx, eIdx) => {
+    const o = inst.lastOut;
+    o.accum = { level: o.prev.poc + 1, short: false,
+      start: L10[sIdx], end: L10[eIdx],
+      winHi: o.prev.poc + 2, winLo: o.prev.poc - 1,
+      rows: [{ price: o.prev.poc, frac: 1, inVA: true, isPoc: true, h: 0.5 }] };
+  };
+
+  // 10a: fresh window ending 10 bars from the live edge: box draws, the
+  // histogram is width-capped so it cannot cross the edge, no flags, no
+  // provenance marker (window is inside the current session)
+  mkAcc(L10.length - 60, L10.length - 10);
+  let it10 = frame();
+  check(it10.some(x => x.key === 'accB'), 'part10a: ACCUM box missing');
+  let sawApro = false;
+  for (const it of it10) {
+    if (it.tag !== 'Shapes' || !it.key.startsWith('apro')) continue;
+    sawApro = true;
+    for (const pr of it.primitives)
+      check(pr.position.x.v + pr.size.width.v <= iLast - 11,
+        'part10a: ACCUM histogram crosses the live edge');
+  }
+  check(sawApro, 'part10a: ACCUM histogram missing');
+  let s310 = it10.find(x => x.key === 'stat3');
+  check(s310 && s310.text.indexOf('[future-grid') < 0, 'part10a: false future-grid flag');
+  let accT10 = it10.find(x => x.key === 'accT');
+  check(accT10 && accT10.text.indexOf('\u25C0') < 0, 'part10a: false provenance marker');
+
+  // 10a2: window far LEFT of the session start: the right-edge label must
+  // self-describe with the provenance suffix (off-viewport box class)
+  mkAcc(100, 400);
+  it10 = frame();
+  accT10 = it10.find(x => x.key === 'accT');
+  check(accT10 && accT10.text.indexOf('\u25C0') >= 0 && /\d+\.\dd/.test(accT10.text),
+    'part10a2: provenance suffix missing on far-left window');
+
+  // 10b: poisoned resolution placing x0 at i+1 (legal per the overshoot
+  // guard): the node ticks would extend to i+7 -- the emitted-geometry
+  // invariant must prune them, name them, and the per-layer cross-check
+  // must flag the poisoned day anchor
+  const dayTs = inst.lastOut.dayStartTms;
+  const orig = inst._idxOf.bind(inst);
+  inst._idxOf = (t, e, c) => t === dayTs ? e + 1 : orig(t, e, c);
+  it10 = frame();
+  check(it10.every(x => x.key !== 'ndL' && x.key !== 'ndH'),
+    'part10b: future-grid node ticks not pruned');
+  s310 = it10.find(x => x.key === 'stat3');
+  check(s310 && s310.text.indexOf('[future-grid item:') >= 0 &&
+    s310.text.indexOf('nd') >= 0,
+    'part10b: future-grid flag missing or unnamed');
+  check(s310 && /\[anchor mismatch: [a-z,?]*day/.test(s310.text),
+    'part10b: poisoned day anchor not cross-checked');
+  inst._idxOf = orig;
+
+  // 10c: inverted window (stale start resolving newer than end): box and
+  // histogram must be suppressed entirely
+  mkAcc(L10.length - 10, L10.length - 60);
+  it10 = frame();
+  check(it10.every(x => x.key !== 'accB' && !x.key.startsWith('apro')),
+    'part10c: inverted ACCUM window still drawn');
+  console.log('part10 emitted geometry:    caps, pruning, provenance, inversion OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

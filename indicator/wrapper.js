@@ -719,9 +719,12 @@ class traderMachell {
         // keyed by the session's own start tms (not loop position): the
         // slice window shifts at every 17:00 NY roll and positional keys
         // would swap identity across all six profiles (the A8 defect class)
+        // (width additionally capped at the live edge, like every other
+        // right-growing histogram -- section-6 audit)
+        const wS = duMode ? Math.min(this.wSess, i - 12 - six) : VIS.sessMaxPx;
+        if (duMode && wS < 8) continue;
         items.push(...histogram("sp" + sp.start, sp.rows, six, 1,
-          COLORS.sess, COLORS.sessVA, COLORS.sessPoc,
-          duMode ? this.wSess : VIS.sessMaxPx, duMode));
+          COLORS.sess, COLORS.sessVA, COLORS.sessPoc, wS, duMode));
       }
     }
 
@@ -808,12 +811,19 @@ class traderMachell {
     if (out.accum) {
       const ia = idx(out.accum.start, "accum");
       const ib = idx(out.accum.end, "accum");
-      if (ia !== undefined && ib !== undefined && out.accum.winHi) {
+      // section-6 audit guards: the window must be non-inverted (a stale
+      // ia with a fresh ib -- or vice versa -- would otherwise draw a box
+      // whose "width" points the wrong way and a histogram forced to its
+      // 10-bar minimum growing PAST the anchor), and the histogram may
+      // not cross the live edge when the window ends near it.
+      if (ia !== undefined && ib !== undefined && ib > ia && out.accum.winHi) {
         items.push(box("accB", ia, ib, out.accum.winHi, out.accum.winLo, COLORS.accum));
         if (out.accum.rows) {
-          const wCap = duMode ? Math.min(this.wAcc, Math.max(10, ib - ia)) : VIS.accMaxPx;
-          items.push(...histogram("apro", out.accum.rows, ia, 1,
-            COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
+          let wCap = duMode ? Math.min(this.wAcc, Math.max(10, ib - ia)) : VIS.accMaxPx;
+          if (duMode) wCap = Math.min(wCap, i - 12 - ia);
+          if (!duMode || wCap >= 8)
+            items.push(...histogram("apro", out.accum.rows, ia, 1,
+              COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
         }
       }
       // NEVER pin the ACCUM level at x0 when its window predates loaded
@@ -821,10 +831,18 @@ class traderMachell {
       // session start) -- an old level honestly extends from the left edge
       items.push(ray("accL", ia !== undefined ? ia : oldAnchor(out.accum.start, "accum"),
         out.accum.level, COLORS.accum, 2, 1));
+      // provenance suffix: when the rotation window sits LEFT of the
+      // current session start, its box can be far off-viewport while this
+      // right-edge label is all the trader sees of ACCUM -- say so
+      // (live 2026-08-09 late session: the "cluster at the live edge" was
+      // this label + ray + the dev profile; the box was off-screen left).
+      const accAge = (ia === undefined || ia < x0)
+        ? "  \u25C0 " + ((out.tMs - out.accum.start) / 86400e3).toFixed(1) + "d"
+        : "";
       lab("accT", out.accum.level,
         "ACCUM " + fmt(out.accum.level) +
         (out.accum.short ? "  SELL retest" : "  BUY retest") +
-        "  [+0.28R/75% n12]", COLORS.accum);
+        "  [+0.28R/75% n12]" + accAge, COLORS.accum);
     }
 
     // ---- LEG cluster ----
@@ -910,6 +928,38 @@ class traderMachell {
     // ---- right-edge labels, de-collided ----
     items.push(...layoutLabels(labels, lx, out.atr || 0));
 
+    // ---- emitted-geometry invariant (field report section 6) ----
+    // Final guard on the GEOMETRY ACTUALLY EMITTED, independent of where
+    // any x came from: no chart-space rectangle or line may extend beyond
+    // the live bar (+2 bars of slack for the zone/ray base segments).
+    // Whatever produces an out-of-space coordinate -- a unit confusion, a
+    // stale frame, a path an audit missed -- the item is dropped here and
+    // NAMED on the banner instead of painting the future grid. Text is
+    // exempt (the label column at i+4 is the designed exception).
+    const xCap = i + 2;
+    const futureKeys = new Set();
+    for (let n2 = items.length - 1; n2 >= 0; n2--) {
+      const it = items[n2];
+      let bad = false;
+      if (it.tag === "Shapes") {
+        for (const pr of it.primitives) {
+          const x = pr.position.x;
+          if (x.unit !== "du") continue;
+          if (x.v > xCap ||
+              (pr.size.width.unit === "du" && x.v + pr.size.width.v > xCap))
+            bad = true;
+        }
+      } else if (it.tag === "LineSegments") {
+        for (const ln of it.lines)
+          for (const p2 of [ln.a, ln.b])
+            if (p2.x.unit === "du" && p2.x.v > xCap) bad = true;
+      }
+      if (bad) {
+        futureKeys.add(it.key);
+        items.splice(n2, 1);
+      }
+    }
+
     // ---- status banner, pinned to the viewport (fixed line slots) ----
     // Emitted LAST so every anchor-health flag raised during the item
     // builds above is reflected in THIS frame (frame-pinned text renders
@@ -936,6 +986,8 @@ class traderMachell {
     if (!x0Ok) ctx.push("[anchor unresolved - profiles hidden]");
     if (this._overshoot) ctx.push("[anchor overshoot]");
     if (mism.size) ctx.push("[anchor mismatch: " + [...mism].sort().join(",") + "]");
+    if (futureKeys.size)
+      ctx.push("[future-grid item: " + [...futureKeys].sort().join(",") + "]");
     if (offscreen) ctx.push("[old anchors offscreen - load more bars]");
     if (this._desync) ctx.push("[mirror desync]");
     // delta-proxy disclosure (registry section 4: grades were measured on
@@ -965,12 +1017,26 @@ class traderMachell {
           ? (this.tmsList.length && t < this.tmsList[0] ? "pre" : "?")
           : String(endIdx - r);
       };
+      // emit=: the du x actually EMITTED for the ACCUM box/ray and the
+      // first session profile ("-" = item not drawn this frame). Compared
+      // against acc=..: one screenshot proves whether emitted geometry
+      // matches the resolved anchors (field report section 6).
+      const emitOf = key => {
+        const it = items.find(x2 => x2.key === key ||
+          (key === "sp" && x2.tag === "Shapes" && /^sp\d/.test(x2.key)));
+        if (!it) return "-";
+        if (it.tag === "Shapes") return String(it.primitives[0].position.x.v);
+        if (it.tag === "LineSegments") return String(it.lines[0].a.x.v);
+        return "-";
+      };
       items.push(frameTxt("stat4", 70, 72,
         "anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
         " i=" + i + " base=" + this.idxBase + " mirror=" + this.tmsList.length +
         " gap=" + (this.mirrorGapped ? 1 : 0) +
         " desync=" + (this._desync ? 1 : 0) +
         (out.accum ? " acc=" + age(out.accum.start) + ".." + age(out.accum.end) : "") +
+        " emit accB@" + emitOf("accB") + " accL@" + emitOf("accL") +
+        " sp@" + emitOf("sp") +
         "   props: " + dump,
         COLORS.dim, FONT_SM));
     }
