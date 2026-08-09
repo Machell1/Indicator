@@ -614,6 +614,109 @@ if (aln.length) {
   console.log('part7 anchor robustness:    prepend, gap-desync, unresolved OK');
 }
 
+// -- part 8: WEEKEND-GAP LIVE BOOT (live field report, 2026-08-09 18:00 ET
+// open). Reproduces the exact live signature: cached Thu+Fri history is
+// replayed at boot; at the live snap the chart TRIMS the head and Sunday
+// bars append 49h after Friday's close; history.get is dead during live
+// (Q3), so no rebase can fire and base stays 0. Old stored indexes are
+// now stale (+T): v6.1 resolved them into the future grid. The fix must
+// resolve every anchor exactly (tail-offset trusted while the mirror has
+// no known gaps), flag [mirror desync], and never place anything > i. --
+{
+  const SESS = 1380, T = 354, LIVE = 120;
+  const thuFri = bars.slice(0, 2 * SESS);
+  const gapMs = 49 * 3600e3 - (bars[2 * SESS].tMs - bars[2 * SESS - 1].tMs);
+  const sunday = bars.slice(2 * SESS, 2 * SESS + LIVE)
+    .map(b => Object.assign({}, b, { tMs: b.tMs + gapMs }));
+  const inst = new Calc();
+  inst.props = { htfSessions: 20 };
+  inst.contractInfo = { tickSize: 0.1 };
+  inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  inst.init();
+  // phase A: cached boot replay (complete bars, indexes 0..N-1)
+  const entsA = thuFri.map((b, j) => entity(b, j === thuFri.length - 1, true));
+  for (let j = 0; j < entsA.length; j++)
+    inst.map(entsA[j], j, makeHistory(entsA.slice(0, j + 1)));
+  // phase B: live snap -- head trimmed by T, Sunday bars arrive as
+  // model-A direct completes, history.get dead throughout
+  const deadHistory = { data: { length: 0 }, get: () => undefined };
+  const entsB = thuFri.slice(T).map(b => entity(b, false, true));
+  let res8 = null;
+  for (let j = 0; j < sunday.length; j++) {
+    entsB.push(entity(sunday[j], j === sunday.length - 1, true));
+    res8 = inst.map(entsB[entsB.length - 1], entsB.length - 1, deadHistory);
+  }
+  const items8 = res8.graphics.items;
+  const iLast = entsB.length - 1;
+  const gt = t => {
+    for (let j = entsB.length - 1; j >= 0; j--)
+      if (entsB[j].timestamp().getTime() === t) return j;
+    return -1;
+  };
+  check(inst.idxBase === 0, 'part8: base drifted (live signature was base=0)');
+  // the current-session anchor AND every old-timestamp anchor must land
+  // on the post-trim ground truth
+  const dayLn8 = items8.find(x => x.key === 'dayLn');
+  check(!!dayLn8, 'part8: session marker missing');
+  if (dayLn8)
+    check(dayLn8.lines[0].a.x.v === gt(inst.lastOut.dayStartTms),
+      `part8: dayStart anchor ${dayLn8.lines[0].a.x.v} != ground truth ${gt(inst.lastOut.dayStartTms)}`);
+  let spChecked = 0;
+  for (const it of items8) {
+    if (it.tag !== 'Shapes' || !/^sp\d/.test(it.key)) continue;
+    const want = gt(Number(it.key.replace(/^sp/, '').replace(/[MVP]$/, '')));
+    for (const pr of it.primitives)
+      check(pr.position.x.v === want,
+        `part8: session profile ${it.key} at ${pr.position.x.v} != ground truth ${want}`);
+    spChecked++;
+  }
+  check(spChecked > 0, 'part8: no historical session profiles to verify');
+  // nothing anywhere may sit in the future grid
+  for (const it of items8) {
+    if (it.tag === 'Shapes')
+      for (const pr of it.primitives)
+        check(pr.position.x.v <= iLast - 10,
+          'part8: rect in the future grid: ' + it.key + '@' + pr.position.x.v);
+    if (it.tag === 'LineSegments')
+      for (const ln of it.lines)
+        for (const p8 of [ln.a, ln.b])
+          check(p8.x.v <= iLast + 8,
+            'part8: line in the future grid: ' + it.key + '@' + p8.x.v);
+  }
+  const s38 = items8.find(x => x.key === 'stat3');
+  check(s38 && s38.text.indexOf('[mirror desync]') >= 0,
+    'part8: stale stored indexes not flagged as desync');
+  check(s38 && s38.text.indexOf('[anchor overshoot]') < 0,
+    'part8: false overshoot flag');
+
+  // 8b: force the failure the guard exists for -- trust flipped to the
+  // stored path (mirror flagged gappy) while the stored frame is stale
+  // enough to resolve past the live bar (the live frame's "displaced into
+  // the future grid" class). Overshooting anchors must be SUPPRESSED and
+  // flagged, never drawn.
+  inst.mirrorGapped = true;
+  inst.idxList = inst.idxList.map(v => v + 3000);
+  const items8b = inst.buildItems(entsB[iLast], iLast, null);
+  const s38b = items8b.find(x => x.key === 'stat3');
+  check(s38b && s38b.text.indexOf('[anchor overshoot]') >= 0,
+    'part8b: overshoot marker missing');
+  check(s38b && s38b.text.indexOf('[anchor unresolved') >= 0,
+    'part8b: unresolved marker missing');
+  check(items8b.every(x => x.key !== 'dayLn' && !/^(dpro|ppro|sp\d)/.test(x.key)),
+    'part8b: stale-anchored layer still drawn');
+  for (const it of items8b) {
+    if (it.tag === 'Shapes')
+      for (const pr of it.primitives)
+        check(pr.position.x.v <= iLast + 8, 'part8b: rect in the future grid: ' + it.key);
+    if (it.tag === 'LineSegments')
+      for (const ln of it.lines)
+        for (const p8 of [ln.a, ln.b])
+          check(p8.x.v <= iLast + 8, 'part8b: line in the future grid: ' + it.key);
+  }
+  console.log('part8 weekend-gap boot:     ' + spChecked +
+    ' session profiles exact, desync flagged, overshoot guard OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

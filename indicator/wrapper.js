@@ -354,6 +354,9 @@ class traderMachell {
     //    means the mirror missed bars -> flagged on the banner.
     this.idxBase = 0;
     this._desync = false;
+    this._overshoot = false;
+    this.mirrorGapped = false;    // sticky: the walk-back stranded bars at
+    // least once, so the mirror may not be one-entry-per-chart-bar
   }
 
   // effective options, re-derived EVERY draw from coerced props (field
@@ -491,12 +494,14 @@ class traderMachell {
       this.idxBase = i - this.idxList[this.idxList.length - 1];
     if (history && typeof history.get === "function" && i > 0) {
       let k = i - 1;
+      let sawBoundary = false;
       const backlog = [], idxs = [];
       while (k >= 0 && backlog.length < 500) {
         const e = history.get(k);
         if (!e || typeof e.timestamp !== "function") break;
         const eMs = e.timestamp().getTime();
         if (eMs <= this.lastPushedMs) {
+          sawBoundary = true;
           // ...and the walk-back boundary covers the engine model where
           // closed bars are never re-mapped directly
           if (this.idxList.length && eMs === this.lastPushedMs)
@@ -507,6 +512,13 @@ class traderMachell {
         idxs.push(k);
         k--;
       }
+      // a walk that ends WITHOUT reaching the already-pushed boundary
+      // (history.get failed mid-walk, or the 500-bar cap filled) is about
+      // to strand bars: everything older than this backlog gets locked
+      // out by the lastPushedMs guard forever. Record the fact -- it
+      // decides which anchor-resolution path can be trusted (see _idxOf).
+      if (!sawBoundary && k >= 0 && this.idxList.length && backlog.length)
+        this.mirrorGapped = true;
       for (let b = backlog.length - 1; b >= 0; b--)
         this._pushEntity(backlog[b], idxs[b]);
     }
@@ -534,11 +546,25 @@ class traderMachell {
     return Object.assign({ graphics: { items: this.buildItems(d, i, history) } }, vaVals);
   }
 
-  // resolve a bar-start timestamp to its CURRENT chart index.
-  // PRIMARY: the chart index recorded when the bar was pushed (frame-0
-  // normalized) + the current prepend base -- correct even if the mirror
-  // missed bars. CROSS-CHECK: tail-offset (one push per chart bar); a
-  // disagreement means the mirror is gappy (Q3) and is flagged visibly.
+  // resolve a bar-start timestamp to its CURRENT chart index, by exact
+  // binary search over actual mirror entries only (never by time).
+  //
+  // Two independent computations, each exact under a different live
+  // failure mode (both observed on 2026-08-09):
+  //  - TAIL-OFFSET (position in the mirror counted from the newest entry,
+  //    anchored at the live bar's ground-truth index): exact even when
+  //    the platform RE-INDEXES or TRIMS the chart array between pushes
+  //    (the 18:00-ET-open frame: old anchors overshot into the future
+  //    grid because stored indexes went stale with no rebase observable).
+  //    Its only blind spot: a mirror that MISSED bars.
+  //  - STORED-INDEX (chart index recorded at push time + prepend base):
+  //    exact even when the mirror missed bars (Q3 walk-back failures),
+  //    but stale if the chart re-indexed unseen.
+  // The walk-back now records when it strands bars (mirrorGapped), which
+  // is precisely when tail-offset loses its guarantee -- so: trust TAIL
+  // unless the mirror is known-gapped; any disagreement raises the
+  // [mirror desync] banner flag. Regardless of path, an anchor resolved
+  // BEYOND the live bar is invalid: suppressed + [anchor overshoot].
   _idxOf(tMs, endIdx, cache) {
     if (cache.has(tMs)) return cache.get(tMs);
     const L = this.tmsList;
@@ -552,10 +578,15 @@ class traderMachell {
       }
       if (L[lo] !== tMs) res = undefined;
       else {
-        res = this.idxList[lo] + this.idxBase;
+        const stored = this.idxList[lo] + this.idxBase;
         const tail = endIdx - (L.length - 1 - lo);
-        if (tail !== res) this._desync = true;
+        if (stored !== tail) this._desync = true;
+        res = this.mirrorGapped ? stored : tail;
         if (res < 0) res = undefined;
+        else if (res > endIdx + 1) {                // beyond the live bar
+          this._overshoot = true;
+          res = undefined;
+        }
       }
     }
     cache.set(tMs, res);
@@ -578,6 +609,7 @@ class traderMachell {
     // else i-1 (the developing bar is never pushed)
     const endIdx = this.lastPushedMs === d.timestamp().getTime() ? i : i - 1;
     this._desync = false;
+    this._overshoot = false;
     const idx = t => this._idxOf(t, endIdx, tcache);
     // OCCLUSION RULE (live 2026-08-09 afternoon frame): a histogram may
     // never be placed relative to the LAST bar and may never paint over
@@ -599,51 +631,10 @@ class traderMachell {
     const fmt = p => (this.contractInfo && this.contractInfo.tickSize < 0.01)
       ? p.toFixed(3) : p.toFixed(1);
 
-    // ---- status banner, pinned to the viewport (fixed line slots) ----
-    items.push(frameTxt("stat1", 70, 18,
-      "TraderMachell  |  " + (out.status || ""), COLORS.status));
-    if (out.prev)
-      items.push(frameTxt("stat2", 70, 36,
-        "PREV  POC " + fmt(out.prev.poc) + "   VAH " + fmt(out.prev.vah) +
-        "   VAL " + fmt(out.prev.val) +
-        (out.htf ? "      HTF POC " + fmt(out.htf.poc) : "      HTF: needs more history"),
-        COLORS.dim, FONT_SM));
-    const ctx = [];
-    if (out.htf) {
-      const pxNow = d.close();
-      ctx.push("HTF: " + (pxNow > out.htf.vah ? "above value (info, not a gate)"
-        : pxNow < out.htf.val ? "below value (info, not a gate)"
-          : "inside value (balanced)"));
-    }
-    if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
-    if (this.barMin !== 1)
-      ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
-    if (!x0Ok) ctx.push("[anchor unresolved - profiles hidden]");
-    if (this._desync) ctx.push("[mirror desync]");
-    // delta-proxy disclosure (registry section 4: grades were measured on
-    // up/down 1-min volume; live delta is the platform's bid/ask split,
-    // corr 0.87 -- this caveat must stay on the banner)
-    ctx.push("delta=bid/ask proxy (graded on up/down)");
-    ctx.push(duMode ? "[du]" : "[px]");     // effective mode, always visible
-    items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
-      out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
-      FONT_SM));
-    // prop-delivery diagnostics (field report: instrument, don't assume)
-    if (O.diag) {
-      const p = this.props || {};
-      const dump = ["htfSessions", "scaledWidths", "devProfile", "nodes",
-        "vaFill", "vaFillColor", "vaFillOpacity", "showHistory", "alignTest", "diag"]
-        .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
-      // anchor state FIRST: it is the load-bearing diagnostic and the props
-      // dump is long enough to clip off the right edge of the viewport
-      // (learned live 2026-08-09). i/lastTms pin down the live chart-index
-      // space so an anchor displacement can be measured remotely.
-      items.push(frameTxt("stat4", 70, 72,
-        "anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
-        " i=" + i + " base=" + this.idxBase + " mirror=" + this.tmsList.length +
-        "   props: " + dump,
-        COLORS.dim, FONT_SM));
-    }
+    // (the status banner is emitted at the END of this function: the
+    // [mirror desync] / [anchor overshoot] flags are raised inside the
+    // anchor resolutions below, and the live 2026-08-09 session proved
+    // that printing the banner first silently hides them)
 
     // ---- session start marker (verifies the time anchor at a glance) ----
     if (x0Ok && out.prevProf && out.prevProf.length) {
@@ -872,6 +863,59 @@ class traderMachell {
 
     // ---- right-edge labels, de-collided ----
     items.push(...layoutLabels(labels, lx, out.atr || 0));
+
+    // ---- status banner, pinned to the viewport (fixed line slots) ----
+    // Emitted LAST so every anchor-health flag raised during the item
+    // builds above is reflected in THIS frame (frame-pinned text renders
+    // at its px coords regardless of array position; being last also
+    // keeps the banner on top).
+    items.push(frameTxt("stat1", 70, 18,
+      "TraderMachell  |  " + (out.status || ""), COLORS.status));
+    if (out.prev)
+      items.push(frameTxt("stat2", 70, 36,
+        "PREV  POC " + fmt(out.prev.poc) + "   VAH " + fmt(out.prev.vah) +
+        "   VAL " + fmt(out.prev.val) +
+        (out.htf ? "      HTF POC " + fmt(out.htf.poc) : "      HTF: needs more history"),
+        COLORS.dim, FONT_SM));
+    const ctx = [];
+    if (out.htf) {
+      const pxNow = d.close();
+      ctx.push("HTF: " + (pxNow > out.htf.vah ? "above value (info, not a gate)"
+        : pxNow < out.htf.val ? "below value (info, not a gate)"
+          : "inside value (balanced)"));
+    }
+    if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
+    if (this.barMin !== 1)
+      ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
+    if (!x0Ok) ctx.push("[anchor unresolved - profiles hidden]");
+    if (this._overshoot) ctx.push("[anchor overshoot]");
+    if (this._desync) ctx.push("[mirror desync]");
+    // delta-proxy disclosure (registry section 4: grades were measured on
+    // up/down 1-min volume; live delta is the platform's bid/ask split,
+    // corr 0.87 -- this caveat must stay on the banner)
+    ctx.push("delta=bid/ask proxy (graded on up/down)");
+    ctx.push(duMode ? "[du]" : "[px]");     // effective mode, always visible
+    items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
+      out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
+      FONT_SM));
+    // prop-delivery diagnostics (field report: instrument, don't assume)
+    if (O.diag) {
+      const p = this.props || {};
+      const dump = ["htfSessions", "scaledWidths", "devProfile", "nodes",
+        "vaFill", "vaFillColor", "vaFillOpacity", "showHistory", "alignTest", "diag"]
+        .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
+      // anchor state FIRST: it is the load-bearing diagnostic and the props
+      // dump is long enough to clip off the right edge of the viewport
+      // (learned live 2026-08-09). i/gap/desync pin down the live
+      // chart-index space so a displacement can be measured remotely.
+      items.push(frameTxt("stat4", 70, 72,
+        "anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
+        " i=" + i + " base=" + this.idxBase + " mirror=" + this.tmsList.length +
+        " gap=" + (this.mirrorGapped ? 1 : 0) +
+        " desync=" + (this._desync ? 1 : 0) +
+        "   props: " + dump,
+        COLORS.dim, FONT_SM));
+    }
     return items;
   }
 
