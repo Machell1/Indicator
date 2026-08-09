@@ -1302,7 +1302,11 @@ module.exports = {
   tags: ["TraderMachell"],
   params: {
     htfSessions: predef.paramSpecs.period(20),
-    scaledWidths: boolSpec(true),   // du-width rows (scale with zoom); off = proven px mode
+    // DEFAULT false until du-unit rectangle WIDTHS are verified to render
+    // on live data (px widths are the empirically proven mode; du widths
+    // are Cursor's zoom-scaling upgrade -- flip on in the settings dialog
+    // during the first live session and keep it if the profiles draw).
+    scaledWidths: boolSpec(false),  // du-width rows (scale with zoom); off = proven px mode
     showHistory: boolSpec(false),   // label signals from prior sessions
     alignTest: boolSpec(false),     // one-time Rectangle y-anchor self-test
   },
