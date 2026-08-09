@@ -272,7 +272,9 @@ class traderMachell {
       legPivot: Math.max(3, Math.round(12 / barMin)),
       sigBars: Math.max(3, Math.round(15 / barMin)),
       initBars: Math.max(2, Math.round(5 / barMin)),
-      htfSessions: pNum(this.props && this.props.htfSessions, 20),
+      // core builds no HTF composite below 5 sessions (dale_core "< 5"
+      // gate) -- clamp so a dialog value of 1-4 can't silently starve it
+      htfSessions: Math.max(5, Math.round(pNum(this.props && this.props.htfSessions, 20))),
     });
     // du-mode row caps, rescaled so a row's bar-width tracks real time when
     // the zoom buttons switch aggregation (Q1 resets the indicator anyway)
@@ -416,6 +418,10 @@ class traderMachell {
     if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
     if (this.barMin !== 1)
       ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
+    // delta-proxy disclosure (registry section 4: grades were measured on
+    // up/down 1-min volume; live delta is the platform's bid/ask split,
+    // corr 0.87 -- this caveat must stay on the banner)
+    ctx.push("delta=bid/ask proxy (graded on up/down)");
     ctx.push(duMode ? "[du]" : "[px]");     // effective mode, always visible
     items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
       out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
@@ -450,8 +456,12 @@ class traderMachell {
     // px fallback cannot mirror left (negative widths are unproven), so the
     // ghost is du-mode only; rays + labels always draw.
     if (duMode && out.htfRows && x0 > 2) {
+      // cap the mirror's max width at x0 so no row's left edge lands on a
+      // negative du x (unproven coordinate region; shape is preserved --
+      // rows scale proportionally to the cap)
       items.push(...histogram("hpro", out.htfRows, x0, -1,
-        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow, this.wHtf, true));
+        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow,
+        Math.min(this.wHtf, x0), true));
     }
 
     // ---- per-session profiles (MarketProfile-style: one histogram per
@@ -461,7 +471,10 @@ class traderMachell {
         const sp = out.sessionProfiles[s];
         const six = idx(sp.start);
         if (six === undefined) continue;
-        items.push(...histogram("sp" + s, sp.rows, six, 1,
+        // keyed by the session's own start tms (not loop position): the
+        // slice window shifts at every 17:00 NY roll and positional keys
+        // would swap identity across all six profiles (the A8 defect class)
+        items.push(...histogram("sp" + sp.start, sp.rows, six, 1,
           COLORS.sess, COLORS.sessVA, COLORS.sessPoc,
           duMode ? this.wSess : VIS.sessMaxPx, duMode));
       }
