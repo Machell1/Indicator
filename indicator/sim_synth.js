@@ -421,6 +421,80 @@ if (aln.length) {
   console.log('part4 prop coercion:        ' + cases.length + ' cases OK');
 }
 
+// -- part 5: HVN/LVN node ticks must satisfy the ENGINE's own criteria --
+// (checked on the pre-part2 frame: `items` and core.prev are consistent)
+{
+  const prof = core.prev;
+  const pocV = prof.vol.get(prof.pocRow) || 0;
+  const rowV = price => {
+    const k = Math.round((price - prof.lo) / prof.step - 0.5);
+    // run centers of even-length runs land on a row boundary; accept the
+    // lower-volume side
+    return Math.min(prof.vol.get(k) || 0, prof.vol.get(k + 1) || 0);
+  };
+  const ndL = items.find(x => x.key === 'ndL');
+  const ndH = items.find(x => x.key === 'ndH');
+  const CFGl = require('./dale_core.js').CFG;
+  if (ndL) {
+    check(ndL.lines.length <= 4, 'part5: too many LVN ticks');
+    for (const ln of ndL.lines)
+      check(rowV(ln.a.y.v) < CFGl.lvnFrac * pocV,
+        'part5: LVN tick at ' + ln.a.y.v.toFixed(2) + ' fails the engine stop criterion');
+  }
+  if (ndH) {
+    check(ndH.lines.length <= 3, 'part5: too many HVN ticks');
+    for (const ln of ndH.lines) {
+      const k = Math.round((ln.a.y.v - prof.lo) / prof.step - 0.5);
+      check((prof.vol.get(k) || 0) >= 0.6 * pocV,
+        'part5: HVN tick at ' + ln.a.y.v.toFixed(2) + ' below 60% of POC volume');
+    }
+  }
+  console.log('part5 node ticks:           ' +
+    (ndL ? ndL.lines.length : 0) + ' LVN, ' + (ndH ? ndH.lines.length : 0) + ' HVN');
+}
+
+// -- part 6: the optional vaFill canvas plotter --
+{
+  const custom = (mod.plotter || []).filter(pl => pl && pl.type === 'custom');
+  check(custom.length === 1, 'part6: expected exactly one custom plotter');
+  const fn = custom.length ? custom[0].fn : null;
+  const draws = [];
+  const canvas = {
+    drawLine: (a, b, style) => draws.push({ a, b, style }),
+    drawPath: () => draws.push({ path: true }),
+  };
+  const mkHist = arr => ({ data: arr, get: i => arr[i] });
+  const hist = mkHist([
+    { __x: 0, vaLo: 100, vaHi: 110 },
+    { __x: 1, vaLo: 100, vaHi: 110 },
+    { __x: 2 },                          // no session data yet: must skip
+  ]);
+  if (fn) {
+    // default off: zero draws
+    fn(canvas, { props: {} }, hist);
+    check(draws.length === 0, 'part6: plotter drew while vaFill off');
+    // on (string prop), custom color, clamped opacity
+    fn(canvas, { props: { vaFill: '1', vaFillColor: '#123456', vaFillOpacity: '250' } }, hist);
+    check(draws.length === 2, 'part6: expected 2 draws, got ' + draws.length);
+    for (const dr of draws) {
+      check(dr.style.opacity > 0 && dr.style.opacity <= 1,
+        'part6: opacity out of range: ' + dr.style.opacity);
+      check(dr.style.color === '#123456', 'part6: color prop not honored');
+      check(dr.a.y === 100 && dr.b.y === 110, 'part6: VA span wrong');
+    }
+    // a throwing history must never propagate (chart safety)
+    let threw6 = false;
+    try { fn(canvas, { props: { vaFill: 1 } }, { data: { length: 1 }, get: () => { throw new Error('x'); } }); }
+    catch (e) { threw6 = true; }
+    check(!threw6, 'part6: plotter exception escaped');
+  }
+  // per-bar map() output must carry the session VA for the plotter
+  check(A.lastResult && A.lastResult.vaLo === core.prev.val &&
+    A.lastResult.vaHi === core.prev.vah,
+    'part6: map() output missing vaLo/vaHi for the plotter');
+  console.log('part6 vaFill plotter:       gating + draws OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

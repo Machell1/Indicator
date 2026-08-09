@@ -4,8 +4,30 @@
  * TraderMachell.js (the single module you paste into Tradovate's
  * Indicator Editor).
  *
- * VISUAL SUITE v5 -- v4 field fixes + a native SESSION VOLUME PROFILE
- * layer (docs/VISUAL_V5_SVP.md). The SVP feature set follows the leading
+ * VISUAL SUITE v6 -- v5 + techniques learned from studying free community
+ * indicator sources (docs/VISUAL_V6_SOURCES.md; all code here is original,
+ * the studied repos are license-restricted and were used for technique
+ * discovery only):
+ *  - TRANSLUCENT VALUE-AREA FILL (vaFill=1, DEFAULT OFF until live-
+ *    verified): community indicators achieve real translucency through
+ *    the CUSTOM CANVAS PLOTTER pipeline (predef.plotters.custom ->
+ *    canvas.drawLine with a first-class `opacity` style), which is
+ *    independent of the graphics-items path where fill alpha proved
+ *    broken (live Bug A). One bar-wide vertical line per bar from VAL to
+ *    VAH shades the value area of every session on the chart. If the
+ *    indicator fails to LOAD after this version, delete the clearly
+ *    marked PLOTTER BLOCK at the bottom of the file -- everything else
+ *    is unaffected.
+ *  - HVN / LVN NODE TICKS (nodes=1, default): computed from THIS
+ *    project's locked profile math. LVNs use the engine's own
+ *    stopBehindLVN criterion (row volume < lvnFrac x POC volume), so the
+ *    ticks mark exactly where the engine sees low-volume structure;
+ *    HVNs are prominent local maxima. Display-only, capped, no labels.
+ *  - USER COLOR/OPACITY PARAMS for the fill layer (paramSpecs.color is
+ *    used by working community indicators), defensively coerced like
+ *    every other prop.
+ *
+ * v5: native SESSION VOLUME PROFILE layer (docs/VISUAL_V5_SVP.md). The SVP feature set follows the leading
  * free/open TradingView tools (developing POC/VAH/VAL updating live,
  * prior-session levels locked and extended, per-session histograms), but
  * ALL math is this project's own regression-locked engine: the developing
@@ -90,6 +112,7 @@
 const predef = require("./tools/predef");
 const meta = require("./tools/meta");
 const { px, du, op } = require("./tools/graphics");
+const plt = require("./tools/plotting");
 
 // ---- render configuration ------------------------------------------------
 // RECT_Y_ANCHOR: which edge of a Rectangle `position.y` names. "bottom"
@@ -327,10 +350,62 @@ class traderMachell {
     return {
       duMode: pBool(p.scaledWidths, true),   // du widths live-proven 2026-08-09
       dev: pBool(p.devProfile, true),        // developing session profile (SVP)
+      nodes: pBool(p.nodes, true),           // HVN/LVN ticks on the prior profile
       history: pBool(p.showHistory, false),
       alignTest: pBool(p.alignTest, false),
       diag: pBool(p.diag, false),
     };
+  }
+
+  // ---- HVN / LVN nodes on the PRIOR-session profile (display-only) ----
+  // LVN: contiguous runs of rows below the engine's own stop criterion
+  // (row volume < lvnFrac x POC volume -- identical to stopBehindLVN), so
+  // a tick marks exactly where the engine sees a low-volume pocket.
+  // HVN: local maxima >= 60% of POC volume, at least 3 rows from the POC.
+  // Edge runs are excluded (profile tails are trivially thin), counts are
+  // capped, recomputed once per session (cached by day).
+  _nodesOf(out) {
+    const prof = this.core.prev;
+    if (!prof) return null;
+    const N = this._nd;
+    if (N && N.day === out.day) return N;
+    const keys = [...prof.vol.keys()].sort((a, b) => a - b);
+    const res = { day: out.day, lvns: [], hvns: [] };
+    this._nd = res;
+    if (!keys.length) return res;
+    const kLo = keys[0], kHi = keys[keys.length - 1];
+    const pocV = prof.vol.get(prof.pocRow) || 0;
+    if (pocV <= 0) return res;
+    const v = k => prof.vol.get(k) || 0;
+    const lvnCut = CFG.lvnFrac * pocV;
+    // LVN runs (missing rows count as zero volume)
+    let runA = null;
+    const runs = [];
+    for (let k = kLo; k <= kHi + 1; k++) {
+      const low = k <= kHi && v(k) < lvnCut;
+      if (low && runA === null) runA = k;
+      else if (!low && runA !== null) { runs.push([runA, k - 1]); runA = null; }
+    }
+    for (const [a, b] of runs) {
+      if (a <= kLo || b >= kHi) continue;          // edge tails excluded
+      let depth = Infinity;
+      for (let k = a; k <= b; k++) if (v(k) < depth) depth = v(k);
+      res.lvns.push({ price: prof.lo + ((a + b + 1) / 2) * prof.step, depth });
+    }
+    res.lvns.sort((x, y) => x.depth - y.depth);    // deepest pockets first
+    res.lvns = res.lvns.slice(0, 4);
+    // HVN local maxima
+    for (let k = kLo + 1; k < kHi; k++) {
+      if (Math.abs(k - prof.pocRow) < 3) continue; // the POC row owns its zone
+      const vk = v(k);
+      if (vk < 0.6 * pocV) continue;
+      if (vk >= v(k - 1) && vk >= v(k + 1) &&
+          vk >= v(k - 2) && vk >= v(k + 2))
+        res.hvns.push({ price: prof.lo + (k + 0.5) * prof.step, vol: vk });
+    }
+    res.hvns.sort((x, y) => y.vol - x.vol);
+    res.hvns = res.hvns.slice(0, 3);
+    return res;
   }
 
   // ---- developing session profile (SVP layer, display-only) ----
@@ -404,8 +479,16 @@ class traderMachell {
     const complete = typeof d.isComplete === "function" ? d.isComplete() : !d.isLast();
     if (complete) this._pushEntity(d);
 
-    if (!d.isLast()) return {};
-    return { graphics: { items: this.buildItems(d, i, history) } };
+    // per-bar values consumed by the optional canvas plotter (vaFill):
+    // each bar carries ITS session's prior value area, so the plotter can
+    // shade the value area of every session on the chart. Plain data --
+    // with no `plots` declared the platform draws nothing by itself
+    // (community-indicator precedent).
+    const prev = this.lastOut && this.lastOut.prev;
+    const vaVals = prev ? { vaLo: prev.val, vaHi: prev.vah } : {};
+
+    if (!d.isLast()) return vaVals;
+    return Object.assign({ graphics: { items: this.buildItems(d, i, history) } }, vaVals);
   }
 
   // resolve a bar-start timestamp to its CURRENT chart index. The pushed
@@ -558,6 +641,25 @@ class traderMachell {
       lab("valT", out.prev.val, "VAL " + fmt(out.prev.val), COLORS.va, FONT_SM);
     }
 
+    // ---- HVN / LVN node ticks, projected from the session start ----
+    // Short, quiet ticks: dark red = low-volume pocket (where the engine's
+    // stopBehindLVN sees structure), pale gold = high-volume node.
+    if (O.nodes) {
+      const nd = this._nodesOf(out);
+      if (nd && (nd.lvns.length || nd.hvns.length)) {
+        const tick = pr => ({ tag: "Line",
+          a: { x: du(x0), y: du(pr) }, b: { x: du(x0 + 6), y: du(pr) } });
+        if (nd.lvns.length)
+          items.push({ tag: "LineSegments", key: "ndL", global: true,
+            lines: nd.lvns.map(n => tick(n.price)),
+            lineStyle: { lineWidth: 3, color: "#8A4A50" } });
+        if (nd.hvns.length)
+          items.push({ tag: "LineSegments", key: "ndH", global: true,
+            lines: nd.hvns.map(n => tick(n.price)),
+            lineStyle: { lineWidth: 3, color: "#B0A060" } });
+      }
+    }
+
     // ---- naked POC rays (Dale's signature: red, extended until tested) ----
     if (out.nakedPocs) {
       for (let n = 0; n < out.nakedPocs.length; n++) {
@@ -689,6 +791,36 @@ class traderMachell {
   filter() { return true; }
 }
 
+// ---- PLOTTER BLOCK (optional translucent value-area fill) ----
+// The custom-plotter pipeline (canvas.drawLine with a first-class
+// `opacity` style) is how working community indicators render real
+// translucency -- independent of the graphics-items path where fill
+// alpha is broken (live Bug A). Draws one bar-wide vertical line per bar
+// from that bar's session VAL to VAH. Gated by vaFill (DEFAULT OFF until
+// live-verified). Defensive throughout: a failure here must never take
+// the chart down. ROLLBACK: if the indicator fails to LOAD after adding
+// this version, delete this block and the `plotter` key in
+// module.exports below.
+function vaFillPlotter(canvas, instance, history) {
+  try {
+    const props = instance.props || {};
+    if (!pBool(props.vaFill, false)) return;
+    const color = (typeof props.vaFillColor === "string" && props.vaFillColor)
+      ? props.vaFillColor : "#3E7E93";
+    let opac = Number(props.vaFillOpacity);
+    if (!Number.isFinite(opac)) opac = 18;
+    opac = Math.max(0, Math.min(100, opac)) / 100;
+    if (opac <= 0) return;
+    for (let i = 0; i < history.data.length; i++) {
+      const item = history.get(i);
+      if (!item || item.vaLo === undefined || item.vaHi === undefined) continue;
+      const x = plt.x.get(item);
+      canvas.drawLine(plt.offset(x, item.vaLo), plt.offset(x, item.vaHi),
+        { color, relativeWidth: 1, opacity: opac });
+    }
+  } catch (e) { /* optional layer: swallow, never break the chart */ }
+}
+
 // Toggles are NUMBER specs (0/1): boolean paramSpecs registered in the
 // settings dialog but their VALUES never reached this.props on live
 // (2026-08-09 session) -- number/period specs follow the documented
@@ -704,8 +836,15 @@ module.exports = {
     htfSessions: predef.paramSpecs.period(20),
     scaledWidths: predef.paramSpecs.number(1, 1, 0),  // 1 = du widths (live-proven, scale with zoom); 0 = px mode
     devProfile: predef.paramSpecs.number(1, 1, 0),    // 1 = developing session profile + dPOC/dVAH/dVAL (SVP); 0 = v4 layout
+    nodes: predef.paramSpecs.number(1, 1, 0),         // 1 = HVN/LVN ticks on the prior profile
+    vaFill: predef.paramSpecs.number(0, 1, 0),        // 1 = translucent VA fill via canvas plotter (verify live first)
+    vaFillColor: predef.paramSpecs.color("#3E7E93"),  // fill color (plotter honors real opacity)
+    vaFillOpacity: predef.paramSpecs.number(18, 1, 0),// fill opacity, 0..100
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner
   },
+  plotter: [
+    predef.plotters.custom(vaFillPlotter),
+  ],
 };
