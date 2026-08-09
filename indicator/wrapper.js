@@ -4,7 +4,33 @@
  * TraderMachell.js (the single module you paste into Tradovate's
  * Indicator Editor).
  *
- * VISUAL SUITE v4 -- field fixes from the 2026-08-09 live session
+ * VISUAL SUITE v5 -- v4 field fixes + a native SESSION VOLUME PROFILE
+ * layer (docs/VISUAL_V5_SVP.md). The SVP feature set follows the leading
+ * free/open TradingView tools (developing POC/VAH/VAL updating live,
+ * prior-session levels locked and extended, per-session histograms), but
+ * ALL math is this project's own regression-locked engine: the developing
+ * profile is built by the SAME buildProfile/displayRows used for the
+ * graded levels -- no cloned third-party math, no second profile engine,
+ * no license entanglement (TradingView Pine sources are not portable or
+ * license-free; see the doc).
+ *
+ *  SVP LAYER (v5):
+ *  - DEVELOPING SESSION PROFILE (devProfile=1, default): the CURRENT
+ *    session's volume profile, anchored at the session start in the
+ *    session's own box, recomputed once per committed bar (cached; no
+ *    per-tick cost). Rows use the identical binning/step convention the
+ *    engine applies when it finalizes a session, so at the session roll
+ *    the developing profile converges exactly into the graded one.
+ *  - dPOC / dVAH / dVAL: teal-green dashed rays + labels, updating as the
+ *    session builds (the hallmark SVP feature). DISPLAY-ONLY: signals
+ *    still consume the locked PRIOR-session levels, never these.
+ *  - SVP LAYOUT: with devProfile=1 each session box contains its own
+ *    histogram (prior session's sits in ITS box via sessionProfiles) and
+ *    prior-session structure projects across today as rays + VA zone.
+ *    devProfile=0 restores the v4 layout (prior-session histogram
+ *    projected at today's start instead).
+ *
+ * v4 field fixes from the 2026-08-09 live session
  * (FIELD_REPORT.md, docs/bug/live_bug_opaque_va_band_2026-08-09.png),
  * look modeled on Trader Dale's software (docs/reference/):
  *
@@ -102,6 +128,7 @@ const COLORS = {
   accHist: "#5C4A16",     // ACCUM histogram body
   accPocRow: "#E8E8E8",
   poc: "#FFFFFF", va: "#62A8E8", vaZone: "#3D5F80",
+  dev: "#4DB6AC",         // developing dPOC/dVAH/dVAL (display-only levels)
   htf: "#C9962B", accum: "#FFD54F", leg: "#26C6DA",
   naked: "#E53935", nakedTxt: "#EF9A9A",
   buy: "#00C853", sell: "#FF5252", tp: "#00C853", sl: "#FF5252",
@@ -299,10 +326,42 @@ class traderMachell {
     const p = this.props || {};
     return {
       duMode: pBool(p.scaledWidths, true),   // du widths live-proven 2026-08-09
+      dev: pBool(p.devProfile, true),        // developing session profile (SVP)
       history: pBool(p.showHistory, false),
       alignTest: pBool(p.alignTest, false),
       diag: pBool(p.diag, false),
     };
+  }
+
+  // ---- developing session profile (SVP layer, display-only) ----
+  // Built from the CURRENT session's committed bars with the exact same
+  // grid convention _finalizeSession uses (step = range/rows, same
+  // buildProfile + displayRows), so at the session roll this converges
+  // bit-identically into the graded prior-session profile. Cached and
+  // recomputed only when a bar commits -- zero per-tick cost. Never feeds
+  // the signal machines: those consume locked PRIOR-session levels only.
+  _devProfile(out) {
+    const bars = this.core.dayBars;
+    const minBars = Math.max(10, Math.round(30 / this.barMin));
+    if (!bars || bars.length < minBars) return null;
+    const D = this._dev;
+    if (D && D.day === out.day && D.n === bars.length) return D.ok ? D : null;
+    let lo = Infinity, hi = -Infinity, vol = 0;
+    for (const b of bars) {
+      if (b.l < lo) lo = b.l;
+      if (b.h > hi) hi = b.h;
+      vol += b.vol;
+    }
+    let dev = { day: out.day, n: bars.length, ok: false };
+    if (vol > 0) {
+      const step = Math.max((hi - lo) / this.core.cfg.rows, 1e-9);
+      const prof = buildProfile(bars, step);
+      const rows = prof ? displayRows(prof, 40, hi) : null;
+      if (rows) dev = { day: out.day, n: bars.length, ok: true, rows,
+        poc: prof.poc, vah: prof.vah, val: prof.val };
+    }
+    this._dev = dev;
+    return dev.ok ? dev : null;
   }
 
   _pushEntity(e) {
@@ -467,8 +526,24 @@ class traderMachell {
       }
     }
 
-    // ---- PREV-SESSION volume profile (teal, grows right from day start) ----
-    if (out.prevProf) {
+    // ---- the CURRENT session's box (SVP layout) ----
+    // devProfile=1 (default): the DEVELOPING session profile lives here --
+    // the classic session-volume-profile reading -- with dPOC/dVAH/dVAL
+    // rays updating as the session builds. The prior session's histogram
+    // stays in its own box (sessionProfiles below).
+    // devProfile=0: v4 layout -- prior-session histogram projected here.
+    const dev = O.dev ? this._devProfile(out) : null;
+    if (dev) {
+      items.push(...histogram("dpro", dev.rows, x0, 1,
+        COLORS.profile, COLORS.profileVA, COLORS.pocRow,
+        duMode ? this.wPrev : VIS.prevMaxPx, duMode));
+      items.push(ray("dpocL", x0, dev.poc, COLORS.dev, 2, 2));
+      lab("dpocT", dev.poc, "dPOC " + fmt(dev.poc), COLORS.dev, FONT_SM);
+      items.push(ray("dvahL", x0, dev.vah, COLORS.dev, 1, 5));
+      lab("dvahT", dev.vah, "dVAH " + fmt(dev.vah), COLORS.dev, FONT_SM);
+      items.push(ray("dvalL", x0, dev.val, COLORS.dev, 1, 5));
+      lab("dvalT", dev.val, "dVAL " + fmt(dev.val), COLORS.dev, FONT_SM);
+    } else if (!O.dev && out.prevProf) {
       items.push(...histogram("ppro", out.prevProf, x0, 1,
         COLORS.profile, COLORS.profileVA, COLORS.pocRow,
         duMode ? this.wPrev : VIS.prevMaxPx, duMode));
@@ -628,6 +703,7 @@ module.exports = {
   params: {
     htfSessions: predef.paramSpecs.period(20),
     scaledWidths: predef.paramSpecs.number(1, 1, 0),  // 1 = du widths (live-proven, scale with zoom); 0 = px mode
+    devProfile: predef.paramSpecs.number(1, 1, 0),    // 1 = developing session profile + dPOC/dVAH/dVAL (SVP); 0 = v4 layout
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner
