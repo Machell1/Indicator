@@ -495,6 +495,125 @@ if (aln.length) {
   console.log('part6 vaFill plotter:       gating + draws OK');
 }
 
+// -- part 7: anchor robustness (live 2026-08-09 afternoon frame: a
+// histogram drawn over the final candles). Three failure modes: history
+// PREPENDS shifting every index (Q2), the walk-back silently MISSING
+// bars (Q3 -> mirror desync), and an unresolvable session anchor. --
+{
+  const groundTruthX0 = (inst, ents) => {
+    const t = inst.lastOut.dayStartTms;
+    for (let j = ents.length - 1; j >= 0; j--)
+      if (ents[j].timestamp().getTime() === t) return j;
+    return -1;
+  };
+  const anchorOf = items7 => {
+    const ln = items7.find(x => x.key === 'dayLn');
+    return ln ? ln.lines[0].a.x.v : undefined;
+  };
+  const occlusionOk = (items7, iLast) => {
+    let ok = true;
+    for (const it of items7) {
+      if (it.tag !== 'Shapes' || !it.key.startsWith('dpro')) continue;
+      for (const pr of it.primitives)
+        if (pr.size.width.unit === 'du' &&
+            pr.position.x.v + pr.size.width.v > iLast - 11) ok = false;
+    }
+    return ok;
+  };
+
+  // 7a: PREPEND -- replay a tail, then back-load older history so every
+  // chart index shifts by P; anchors must follow exactly, no desync flag.
+  {
+    const P = 700, M = 6000;
+    const inst = new Calc();
+    inst.props = { htfSessions: 20 };
+    inst.contractInfo = { tickSize: 0.1 };
+    inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+    inst.init();
+    let ents = [];
+    for (let j = P; j < M; j++) ents.push(entity(bars[j], j === M - 1, j < M - 1));
+    let res7;
+    for (let j = 0; j < ents.length; j++)
+      res7 = inst.map(ents[j], j, makeHistory(ents.slice(0, j + 1)));
+    // user pans left: P older bars prepend; the developing bar re-maps
+    const pre = bars.slice(0, P).map(b => entity(b, false, true));
+    ents = pre.concat(ents);
+    res7 = inst.map(ents[ents.length - 1], ents.length - 1, makeHistory(ents));
+    // live continues after the prepend
+    for (let j = M; j < M + 240; j++) {
+      ents[ents.length - 1] = entity(bars[j - 1], false, true);
+      ents.push(entity(bars[j], true, false));
+      res7 = inst.map(ents[ents.length - 1], ents.length - 1, makeHistory(ents));
+    }
+    const items7 = res7.graphics.items;
+    const want = groundTruthX0(inst, ents);
+    check(anchorOf(items7) === want,
+      `part7a: anchor ${anchorOf(items7)} != ground truth ${want} after prepend`);
+    const s3 = items7.find(x => x.key === 'stat3');
+    check(s3 && s3.text.indexOf('desync') < 0, 'part7a: false desync flag');
+    check(occlusionOk(items7, ents.length - 1), 'part7a: histogram over the live edge');
+  }
+
+  // 7b: MISSED PUSHES -- history.get returns undefined for a stretch, so
+  // those bars never enter the mirror. The stored-index anchor must stay
+  // exact and the desync marker must appear (tail-offset now disagrees).
+  {
+    const M = 6000, gapLo = M + 40, gapHi = M + 70;
+    const inst = new Calc();
+    inst.props = { htfSessions: 20 };
+    inst.contractInfo = { tickSize: 0.1 };
+    inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+    inst.init();
+    const ents = [];
+    for (let j = 0; j < M; j++) ents.push(entity(bars[j], j === M - 1, j < M - 1));
+    let res7;
+    for (let j = 0; j < M; j++)
+      res7 = inst.map(ents[j], j, makeHistory(ents.slice(0, j + 1)));
+    const blindHistory = arr => {
+      const h = makeHistory(arr);
+      const get = h.get;
+      h.get = k => (k >= gapLo && k <= gapHi) ? undefined : get(k);
+      return h;
+    };
+    // live phase, model B style (closed bars never re-mapped directly):
+    // bars in [gapLo, gapHi] are invisible to the walk-back forever
+    for (let j = M; j < M + 400; j++) {
+      ents[ents.length - 1] = entity(bars[j - 1], false, true);
+      ents.push(entity(bars[j], true, false));
+      res7 = inst.map(ents[ents.length - 1], ents.length - 1, blindHistory(ents));
+    }
+    const items7 = res7.graphics.items;
+    check(inst.tmsList.length < ents.length, 'part7b: gap did not form');
+    const want = groundTruthX0(inst, ents);
+    check(anchorOf(items7) === want,
+      `part7b: anchor ${anchorOf(items7)} != ground truth ${want} with gappy mirror`);
+    const s3 = items7.find(x => x.key === 'stat3');
+    check(s3 && s3.text.indexOf('[mirror desync]') >= 0,
+      'part7b: desync marker missing from the banner');
+    check(occlusionOk(items7, ents.length - 1), 'part7b: histogram over the live edge');
+  }
+
+  // 7c: UNRESOLVED ANCHOR -- if the session start is not in the mirror,
+  // histograms/zone/marker are hidden (never a last-bar fallback), rays
+  // anchor at the chart edge, and the banner says why.
+  {
+    const inst = A.inst;
+    const cut = inst.tmsList.length - 60;   // drop everything before the tail
+    inst.tmsList.splice(0, cut);
+    inst.idxList.splice(0, cut);
+    const items7 = inst.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+    for (const k of ['dpro', 'ppro', 'vaZ', 'dayLn', 'alnR', 'ndL', 'ndH', 'hpro'])
+      check(items7.every(x => !x.key.startsWith(k)),
+        'part7c: ' + k + ' drawn without a resolved anchor');
+    const pocL = items7.find(x => x.key === 'pocL');
+    check(!!pocL && pocL.lines[0].a.x.v === 0, 'part7c: rays not anchored at chart edge');
+    const s3 = items7.find(x => x.key === 'stat3');
+    check(s3 && s3.text.indexOf('[anchor unresolved') >= 0,
+      'part7c: unresolved-anchor marker missing');
+  }
+  console.log('part7 anchor robustness:    prepend, gap-desync, unresolved OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

@@ -339,13 +339,21 @@ class traderMachell {
     this.vaBySession = {};   // sessionKey -> {vaLo, vaHi} for the vaFill plotter
     this.lastPushedMs = 0;
     this.lastOut = null;
-    this.marks = [];              // {tMs, price, day, ev} -- NO indexes stored:
-    // the chart PREPENDS bars when older history loads, shifting every
-    // absolute index; anchors are resolved from timestamps at draw time
-    this.tmsList = [];            // pushed-bar timestamps, in order -- our
-    // own mirror of the chart's tail, used to turn timestamps into indexes
-    // by offset-from-the-end (immune to prepends AND to platform history
-    // indexing quirks)
+    this.marks = [];              // {tMs, price, day, ev} -- anchors are
+    // resolved from timestamps at draw time, never from stale indexes
+    this.tmsList = [];            // pushed-bar timestamps, in order
+    this.idxList = [];            // each bar's chart index AT PUSH TIME,
+    // normalized to frame-0 by idxBase. Two independent anchor paths:
+    //  - PRIMARY: idxList[pos] + idxBase. Each entry was read straight
+    //    off the platform when the bar was mapped, so it stays correct
+    //    even if the walk-back MISSED bars (Q3 -- the live 2026-08-09pm
+    //    right-shifted-histogram frame). Prepends (Q2) shift all indexes
+    //    uniformly; idxBase is re-measured from any already-pushed bar.
+    //  - CROSS-CHECK: offset-from-the-end of the mirror (the v2..v5
+    //    method), which assumes one push per chart bar. Disagreement
+    //    means the mirror missed bars -> flagged on the banner.
+    this.idxBase = 0;
+    this._desync = false;
   }
 
   // effective options, re-derived EVERY draw from coerced props (field
@@ -445,7 +453,7 @@ class traderMachell {
     return dev.ok ? dev : null;
   }
 
-  _pushEntity(e) {
+  _pushEntity(e, chartIdx) {
     const tMs = e.timestamp().getTime();
     if (tMs <= this.lastPushedMs) return;
     this.lastPushedMs = tMs;
@@ -456,7 +464,11 @@ class traderMachell {
       vol: e.volume(), delta: off - bid,
     };
     this.tmsList.push(tMs);
-    if (this.tmsList.length > 12000) this.tmsList.splice(0, 2000);
+    this.idxList.push(chartIdx - this.idxBase);
+    if (this.tmsList.length > 12000) {
+      this.tmsList.splice(0, 2000);
+      this.idxList.splice(0, 2000);
+    }
     const out = this.core.push(bar);
     this.lastOut = out;
     if (out.absorb)
@@ -470,20 +482,36 @@ class traderMachell {
   }
 
   map(d, i, history) {
+    // prepend rebase (Q2): a bar we have ALREADY pushed reveals its
+    // current chart index; any shift versus what we stored means history
+    // back-loading moved every index -- re-measure the frame offset so
+    // stored indexes stay true. The current bar covers the common case...
+    const dMs = d.timestamp().getTime();
+    if (this.idxList.length && dMs === this.lastPushedMs)
+      this.idxBase = i - this.idxList[this.idxList.length - 1];
     if (history && typeof history.get === "function" && i > 0) {
-      let k = i - 1, backlog = [];
+      let k = i - 1;
+      const backlog = [], idxs = [];
       while (k >= 0 && backlog.length < 500) {
         const e = history.get(k);
         if (!e || typeof e.timestamp !== "function") break;
-        if (e.timestamp().getTime() <= this.lastPushedMs) break;
+        const eMs = e.timestamp().getTime();
+        if (eMs <= this.lastPushedMs) {
+          // ...and the walk-back boundary covers the engine model where
+          // closed bars are never re-mapped directly
+          if (this.idxList.length && eMs === this.lastPushedMs)
+            this.idxBase = k - this.idxList[this.idxList.length - 1];
+          break;
+        }
         backlog.push(e);
+        idxs.push(k);
         k--;
       }
       for (let b = backlog.length - 1; b >= 0; b--)
-        this._pushEntity(backlog[b]);
+        this._pushEntity(backlog[b], idxs[b]);
     }
     const complete = typeof d.isComplete === "function" ? d.isComplete() : !d.isLast();
-    if (complete) this._pushEntity(d);
+    if (complete) this._pushEntity(d, i);
 
     // per-bar values consumed by the optional canvas plotter (vaFill):
     // each bar carries ITS session's prior value area, so the plotter can
@@ -506,11 +534,11 @@ class traderMachell {
     return Object.assign({ graphics: { items: this.buildItems(d, i, history) } }, vaVals);
   }
 
-  // resolve a bar-start timestamp to its CURRENT chart index. The pushed
-  // bars are exactly the chart's TAIL (one per closed chart bar, in
-  // order), so a timestamp's offset from the end of tmsList equals its
-  // offset from the end of the chart -- valid regardless of how many old
-  // bars the chart prepends, and using no platform history APIs at all.
+  // resolve a bar-start timestamp to its CURRENT chart index.
+  // PRIMARY: the chart index recorded when the bar was pushed (frame-0
+  // normalized) + the current prepend base -- correct even if the mirror
+  // missed bars. CROSS-CHECK: tail-offset (one push per chart bar); a
+  // disagreement means the mirror is gappy (Q3) and is flagged visibly.
   _idxOf(tMs, endIdx, cache) {
     if (cache.has(tMs)) return cache.get(tMs);
     const L = this.tmsList;
@@ -522,8 +550,13 @@ class traderMachell {
         const mid = (lo + hi) >> 1;
         if (L[mid] < tMs) lo = mid + 1; else hi = mid;
       }
-      res = (L[lo] === tMs) ? endIdx - (L.length - 1 - lo) : undefined;
-      if (res !== undefined && res < 0) res = undefined;
+      if (L[lo] !== tMs) res = undefined;
+      else {
+        res = this.idxList[lo] + this.idxBase;
+        const tail = endIdx - (L.length - 1 - lo);
+        if (tail !== res) this._desync = true;
+        if (res < 0) res = undefined;
+      }
     }
     cache.set(tMs, res);
     return res;
@@ -544,9 +577,21 @@ class traderMachell {
     // index of the last PUSHED bar: i if the current bar is committed,
     // else i-1 (the developing bar is never pushed)
     const endIdx = this.lastPushedMs === d.timestamp().getTime() ? i : i - 1;
+    this._desync = false;
     const idx = t => this._idxOf(t, endIdx, tcache);
-    let x0 = idx(out.dayStartTms);
-    if (x0 === undefined) x0 = Math.max(0, i - 60);
+    // OCCLUSION RULE (live 2026-08-09 afternoon frame): a histogram may
+    // never be placed relative to the LAST bar and may never paint over
+    // the live edge. If the session-start anchor cannot be resolved,
+    // histograms/zone/ticks are hidden (rays and labels stay -- levels
+    // are horizontal and thin) and the banner says why. When resolved,
+    // right-growing session histograms are width-capped so they stop
+    // short of the final candles.
+    const x0 = idx(out.dayStartTms);
+    const x0Ok = x0 !== undefined;
+    const rayX0 = x0Ok ? x0 : 0;            // levels anchor at the chart edge
+    const availBars = x0Ok ? (i - x0 - 12) : 0;
+    const histOk = x0Ok && availBars >= 8;
+    const capW = w => Math.min(w, availBars);
     const lx = i + 4;                       // label column, right of last bar
     const labels = [];                      // -> layoutLabels at the end
     const lab = (key, price, text, color, font) =>
@@ -573,6 +618,8 @@ class traderMachell {
     if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
     if (this.barMin !== 1)
       ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
+    if (!x0Ok) ctx.push("[anchor unresolved - profiles hidden]");
+    if (this._desync) ctx.push("[mirror desync]");
     // delta-proxy disclosure (registry section 4: grades were measured on
     // up/down 1-min volume; live delta is the platform's bid/ask split,
     // corr 0.87 -- this caveat must stay on the banner)
@@ -587,11 +634,14 @@ class traderMachell {
       const dump = ["htfSessions", "scaledWidths", "devProfile", "nodes",
         "vaFill", "vaFillColor", "vaFillOpacity", "showHistory", "alignTest", "diag"]
         .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
-      items.push(frameTxt("stat4", 70, 72, "props: " + dump, COLORS.dim, FONT_SM));
+      items.push(frameTxt("stat4", 70, 72, "props: " + dump +
+        "   anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
+        " base=" + this.idxBase + " mirror=" + this.tmsList.length,
+        COLORS.dim, FONT_SM));
     }
 
     // ---- session start marker (verifies the time anchor at a glance) ----
-    if (out.prevProf && out.prevProf.length) {
+    if (x0Ok && out.prevProf && out.prevProf.length) {
       let pLo = Infinity, pHi = -Infinity, ph = 0;
       for (const r of out.prevProf) {
         if (r.price < pLo) pLo = r.price;
@@ -605,13 +655,13 @@ class traderMachell {
     // (v3 drew a filled band here; live 2026-08-09 proved fill alpha is
     // not honored -- it rendered as an opaque slab occluding the rows.
     // Dale's zone, rebuilt on proven line primitives.)
-    if (out.prev && i > x0)
+    if (x0Ok && out.prev && i > x0)
       items.push(box("vaZ", x0, i + 1, out.prev.vah, out.prev.val, COLORS.vaZone, 3));
 
     // ---- HTF composite (dark gold ghost, true mirror: grows LEFT) ----
     // px fallback cannot mirror left (negative widths are unproven), so the
     // ghost is du-mode only; rays + labels always draw.
-    if (duMode && out.htfRows && x0 > 2) {
+    if (x0Ok && duMode && out.htfRows && x0 > 2) {
       // cap the mirror's max width at x0 so no row's left edge lands on a
       // negative du x (unproven coordinate region; shape is preserved --
       // rows scale proportionally to the cap)
@@ -644,37 +694,38 @@ class traderMachell {
     // devProfile=0: v4 layout -- prior-session histogram projected here.
     const dev = O.dev ? this._devProfile(out) : null;
     if (dev) {
-      // dev POC row wears the teal-green dev color, NOT the graded gold:
-      // gold is v4's visual signature for the graded PRIOR POC, and the
-      // developing dPOC carries no tested grade (evidence-honesty rule)
-      items.push(...histogram("dpro", dev.rows, x0, 1,
-        COLORS.profile, COLORS.profileVA, COLORS.dev,
-        duMode ? this.wPrev : VIS.prevMaxPx, duMode));
-      items.push(ray("dpocL", x0, dev.poc, COLORS.dev, 2, 2));
+      if (histOk)
+        // dev POC row wears the teal-green dev color, NOT the graded gold:
+        // gold is v4's visual signature for the graded PRIOR POC, and the
+        // developing dPOC carries no tested grade (evidence-honesty rule)
+        items.push(...histogram("dpro", dev.rows, x0, 1,
+          COLORS.profile, COLORS.profileVA, COLORS.dev,
+          duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
+      items.push(ray("dpocL", rayX0, dev.poc, COLORS.dev, 2, 2));
       lab("dpocT", dev.poc, "dPOC " + fmt(dev.poc), COLORS.dev, FONT_SM);
-      items.push(ray("dvahL", x0, dev.vah, COLORS.dev, 1, 5));
+      items.push(ray("dvahL", rayX0, dev.vah, COLORS.dev, 1, 5));
       lab("dvahT", dev.vah, "dVAH " + fmt(dev.vah), COLORS.dev, FONT_SM);
-      items.push(ray("dvalL", x0, dev.val, COLORS.dev, 1, 5));
+      items.push(ray("dvalL", rayX0, dev.val, COLORS.dev, 1, 5));
       lab("dvalT", dev.val, "dVAL " + fmt(dev.val), COLORS.dev, FONT_SM);
-    } else if (!O.dev && out.prevProf) {
+    } else if (!O.dev && out.prevProf && histOk) {
       items.push(...histogram("ppro", out.prevProf, x0, 1,
         COLORS.profile, COLORS.profileVA, COLORS.pocRow,
-        duMode ? this.wPrev : VIS.prevMaxPx, duMode));
+        duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
     }
     if (out.prev) {
       const thin = out.prev.liquid ? "" : "  [THIN - no signals]";
-      items.push(ray("pocL", x0, out.prev.poc, COLORS.poc, 3, 1));
+      items.push(ray("pocL", rayX0, out.prev.poc, COLORS.poc, 3, 1));
       lab("pocT", out.prev.poc, "PREV POC " + fmt(out.prev.poc) + thin, COLORS.poc);
-      items.push(ray("vahL", x0, out.prev.vah, COLORS.va, 1, 3));
+      items.push(ray("vahL", rayX0, out.prev.vah, COLORS.va, 1, 3));
       lab("vahT", out.prev.vah, "VAH " + fmt(out.prev.vah), COLORS.va, FONT_SM);
-      items.push(ray("valL", x0, out.prev.val, COLORS.va, 1, 3));
+      items.push(ray("valL", rayX0, out.prev.val, COLORS.va, 1, 3));
       lab("valT", out.prev.val, "VAL " + fmt(out.prev.val), COLORS.va, FONT_SM);
     }
 
     // ---- HVN / LVN node ticks, projected from the session start ----
     // Short, quiet ticks: dark red = low-volume pocket (where the engine's
     // stopBehindLVN sees structure), pale gold = high-volume node.
-    if (O.nodes) {
+    if (O.nodes && x0Ok) {
       const nd = this._nodesOf(out);
       if (nd && (nd.lvns.length || nd.hvns.length)) {
         const tick = pr => ({ tag: "Line",
@@ -698,19 +749,20 @@ class traderMachell {
         const ix = idx(np.endTms);
         // keyed by session end time, not list position: entries shift as
         // rays get tested, and positional keys would swap identities
-        items.push(ray("nk" + np.endTms, ix !== undefined ? ix : Math.max(0, x0 - 200),
+        items.push(ray("nk" + np.endTms, ix !== undefined ? ix : Math.max(0, rayX0 - 200),
           np.poc, COLORS.naked, 1, 1));
         lab("nkT" + np.endTms, np.poc, "NPOC " + fmt(np.poc), COLORS.nakedTxt, FONT_SM);
       }
     }
 
     if (out.htf) {
-      items.push(ray("hpocL", Math.max(0, x0 - 40), out.htf.poc, COLORS.htf, 3, 1));
+      const hx = Math.max(0, rayX0 - 40);
+      items.push(ray("hpocL", hx, out.htf.poc, COLORS.htf, 3, 1));
       lab("hpocT", out.htf.poc,
         "HTF POC " + fmt(out.htf.poc) + " (" + out.htf.sessions + "s)", COLORS.htf);
-      items.push(ray("hvahL", Math.max(0, x0 - 40), out.htf.vah, COLORS.htf, 1, 4));
+      items.push(ray("hvahL", hx, out.htf.vah, COLORS.htf, 1, 4));
       lab("hvahT", out.htf.vah, "HTF VAH " + fmt(out.htf.vah), COLORS.htf, FONT_SM);
-      items.push(ray("hvalL", Math.max(0, x0 - 40), out.htf.val, COLORS.htf, 1, 4));
+      items.push(ray("hvalL", hx, out.htf.val, COLORS.htf, 1, 4));
       lab("hvalT", out.htf.val, "HTF VAL " + fmt(out.htf.val), COLORS.htf, FONT_SM);
     }
 
@@ -726,7 +778,7 @@ class traderMachell {
             COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
         }
       }
-      items.push(ray("accL", ia !== undefined ? ia : x0, out.accum.level, COLORS.accum, 2, 1));
+      items.push(ray("accL", ia !== undefined ? ia : rayX0, out.accum.level, COLORS.accum, 2, 1));
       lab("accT", out.accum.level,
         "ACCUM " + fmt(out.accum.level) +
         (out.accum.short ? "  SELL retest" : "  BUY retest") +
@@ -735,7 +787,7 @@ class traderMachell {
 
     // ---- LEG cluster ----
     if (out.leg) {
-      items.push(ray("legL", x0, out.leg.level, COLORS.leg, 1, 1));
+      items.push(ray("legL", rayX0, out.leg.level, COLORS.leg, 1, 1));
       lab("legT", out.leg.level,
         "LEG " + fmt(out.leg.level) +
         (out.leg.down ? "  SELL retest" : "  BUY retest") + "  [untested]",
@@ -801,7 +853,7 @@ class traderMachell {
     // path as every histogram row. The white PREV POC ray must bisect the
     // magenta row. Row entirely ABOVE the ray => platform anchors rects at
     // the TOP edge: set RECT_Y_ANCHOR = "top" and rebuild.
-    if (O.alignTest && out.prev && out.prevProf && out.prevProf.length) {
+    if (O.alignTest && x0Ok && out.prev && out.prevProf && out.prevProf.length) {
       const h = out.prevProf[0].h || 0.5;
       const pLo = out.prev.poc - h / 2, pHi = out.prev.poc + h / 2;
       items.push({ tag: "Shapes", key: "alnR", global: true,
@@ -828,11 +880,9 @@ class traderMachell {
 // alpha is broken (live Bug A). Draws one bar-wide vertical line per bar
 // from that bar's session VAL to VAH. Gated by vaFill (DEFAULT OFF until
 // live-verified). Defensive throughout: a failure here must never take
-// the chart down. ROLLBACK if the indicator fails to LOAD even with the
-// guards: the vaFill feature touches exactly THREE sites -- (1) the
-// guarded `plt = require("./tools/plotting")` near the top of the file,
-// (2) the guarded `vaFillColor` param spec, (3) the guarded plotter
-// registration after module.exports. Delete all three plus this block.
+// the chart down. ROLLBACK: if the indicator fails to LOAD after adding
+// this version, delete this block and the `plotter` key in
+// module.exports below.
 function vaFillPlotter(canvas, instance, history) {
   try {
     if (!plt) return;   // ./tools/plotting unavailable on this build
