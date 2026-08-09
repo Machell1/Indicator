@@ -16,10 +16,15 @@
  *      rects are not in the proven-to-render set);
  *   4. VERTICAL ALIGNMENT: the prev-profile POC row straddles the core's
  *      exact POC price; every prev-profile row lies inside the profile's
- *      true price span; the value-area band spans exactly VAL..VAH;
- *   5. HTF ghost rows anchor at x0 - width (true left mirror);
- *   6. right-edge labels: no two occupy the same (price, dy) slot --
- *      the de-collision layout did its job.
+ *      true price span; the value-area ZONE outline spans exactly VAL..VAH
+ *      and no filled band exists (live Bug A, 2026-08-09);
+ *   5. OPAQUE-SAFE COLORS: every fill/line/text color is solid #RRGGBB --
+ *      fill alpha proved unreliable live, nothing may rely on it;
+ *   6. HTF ghost rows anchor at x0 - width (true left mirror);
+ *   7. right-edge labels: no two occupy the same (price, dy) slot --
+ *      the de-collision layout did its job;
+ *   8. prop-coercion torture: bools/strings/numbers/undefined all gate
+ *      width mode and alignTest identically (live Bug B, 2026-08-09).
  *
  * Uses the ./tools dev stubs (Node-only). NOT a substitute for
  * test_core.js / sim_tradovate.js on the real dataset. */
@@ -199,14 +204,37 @@ for (const k of ['pproM', 'pproV', 'pproP'])
       `prev row [${lo.toFixed(2)},${hi.toFixed(2)}] outside profile span`);
   }
 
-// -- value-area band spans exactly VAL..VAH --
-const vaB = rectsOf('vaB');
-check(vaB.length === 1, 'value-area band missing');
-if (vaB.length) {
-  const [lo, hi] = span(vaB[0]);
-  check(Math.abs(lo - core.prev.val) < 1e-9 && Math.abs(hi - core.prev.vah) < 1e-9,
-    'value-area band does not span VAL..VAH');
+// -- value-area ZONE: dashed outline (line primitives, never a fill --
+// live 2026-08-09 proved fill alpha is not honored), spans exactly
+// VAL..VAH from the session start --
+const vaZ = items.find(x => x.key === 'vaZ');
+check(!!vaZ && vaZ.tag === 'LineSegments', 'value-area zone outline missing');
+if (vaZ) {
+  const ys = [];
+  for (const ln of vaZ.lines) { ys.push(ln.a.y.v, ln.b.y.v); }
+  check(Math.abs(Math.min(...ys) - core.prev.val) < 1e-9 &&
+    Math.abs(Math.max(...ys) - core.prev.vah) < 1e-9,
+    'value-area zone does not span VAL..VAH');
 }
+check(items.every(x => x.key !== 'vaB'), 'filled VA band still present (Bug A)');
+
+// -- opaque-safe colors: EVERY color must be a solid hex (#RRGGBB). Any
+// rgba()/alpha reliance is a regression of live Bug A. --
+const solidHex = c => typeof c === 'string' && /^#[0-9A-Fa-f]{6}$/.test(c);
+for (const it of items) {
+  if (it.fillStyle)
+    check(solidHex(it.fillStyle.color), 'non-hex fill color in ' + it.key + ': ' + it.fillStyle.color);
+  if (it.lineStyle)
+    check(solidHex(it.lineStyle.color), 'non-hex line color in ' + it.key + ': ' + it.lineStyle.color);
+  if (it.tag === 'Text' && it.style)
+    check(solidHex(it.style.fill), 'non-hex text color in ' + it.key + ': ' + it.style.fill);
+}
+
+// -- banner shows the effective width mode --
+const stat3 = items.find(x => x.key === 'stat3');
+check(!!stat3 && (stat3.text.indexOf('[du]') >= 0 || stat3.text.indexOf('[px]') >= 0),
+  'banner missing effective mode marker');
+check(stat3 && stat3.text.indexOf('[du]') >= 0, 'expected [du] mode in default run');
 
 // -- HTF ghost: left-anchored mirror, x + width never crosses right of x0 --
 const dayItem = items.find(x => x.key === 'pocL');
@@ -294,17 +322,20 @@ if (aln.length) {
     lab2.length + ' labels, ' + stacked + ' fanned');
 }
 
-// -- part 3: px fallback mode (scaledWidths=0, the v2 proven path) ------
+// -- part 3: px fallback mode (scaledWidths=0, the v2 proven path).
+// Props passed as STRINGS to mirror worst-case platform delivery. --
 {
-  const P = runModel('A', 500, { htfSessions: 20, scaledWidths: 0 });
+  const P = runModel('A', 500, { htfSessions: '20', scaledWidths: '0' });
   const it3 = P.lastResult && P.lastResult.graphics ? P.lastResult.graphics.items : [];
   check(P.threw === 0, 'part3: px mode threw');
   check(it3.length > 0, 'part3: px mode drew nothing');
+  const s3 = it3.find(x => x.key === 'stat3');
+  check(!!s3 && s3.text.indexOf('[px]') >= 0, 'part3: banner does not say [px]');
+  check(it3.some(x => x.key === 'vaZ'), 'part3: VA zone outline missing in px mode');
   for (const it of it3) {
     if (it.tag !== 'Shapes') continue;
     check(!it.key.startsWith('hpro'),
       'part3: HTF ghost drawn in px mode (needs unproven negative widths)');
-    check(it.key !== 'vaB', 'part3: du-width VA band drawn in px mode');
     for (const pr of it.primitives) {
       check(pr.size.width.unit === 'px' && pr.size.width.v > 0,
         'part3: non-px or non-positive row width in ' + it.key);
@@ -312,6 +343,46 @@ if (aln.length) {
     }
   }
   console.log('part3 px-fallback frame:    ' + it3.length + ' items');
+}
+
+// -- part 4: prop-coercion torture. Live 2026-08-09 proved prop delivery
+// cannot be trusted (bool values arrived undefined while the dialog showed
+// them). Every representation a platform could plausibly send must gate
+// the SAME way. --
+{
+  const inst = new Calc();
+  inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  inst.contractInfo = { tickSize: 0.1 };
+  const cases = [
+    // [props, expected duMode, expected alignTest]
+    [{}, true, false],                                        // nothing delivered
+    [{ scaledWidths: undefined, alignTest: undefined }, true, false],
+    [{ scaledWidths: false, alignTest: false }, false, false],
+    [{ scaledWidths: 'false', alignTest: 'false' }, false, false],  // string bools
+    [{ scaledWidths: '0', alignTest: '0' }, false, false],
+    [{ scaledWidths: 0, alignTest: 0 }, false, false],
+    [{ scaledWidths: true, alignTest: true }, true, true],
+    [{ scaledWidths: 'true', alignTest: 'true' }, true, true],
+    [{ scaledWidths: '1', alignTest: '1' }, true, true],
+    [{ scaledWidths: 1, alignTest: 1 }, true, true],
+    [{ scaledWidths: 'garbage', alignTest: 'garbage' }, true, false], // fall to defaults
+  ];
+  for (const [props, wantDu, wantAlign] of cases) {
+    inst.props = Object.assign({ htfSessions: 20 }, props);
+    inst.init();
+    const o = inst._opts();
+    const desc = JSON.stringify(props);
+    check(o.duMode === wantDu, `part4: duMode!=${wantDu} for props ${desc}`);
+    check(o.alignTest === wantAlign, `part4: alignTest!=${wantAlign} for props ${desc}`);
+  }
+  // htfSessions coercion: strings and garbage
+  inst.props = { htfSessions: '35' };
+  inst.init();
+  check(inst.core.cfg.htfSessions === 35, 'part4: htfSessions string not coerced');
+  inst.props = { htfSessions: 'NaN' };
+  inst.init();
+  check(inst.core.cfg.htfSessions === 20, 'part4: htfSessions garbage not defaulted');
+  console.log('part4 prop coercion:        ' + cases.length + ' cases OK');
 }
 
 const kindsOf = c => {

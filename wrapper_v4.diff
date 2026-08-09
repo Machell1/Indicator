@@ -1,0 +1,425 @@
+﻿diff --git a/indicator/wrapper.js b/indicator/wrapper.js
+index 39ca10a..4e21b6a 100644
+--- a/indicator/wrapper.js
++++ b/indicator/wrapper.js
+@@ -4,49 +4,59 @@
+  * TraderMachell.js (the single module you paste into Tradovate's
+  * Indicator Editor).
+  *
+- * VISUAL SUITE (v3 -- alignment + legibility overhaul, modeled on Trader
+- * Dale's software look):
+- *  - PREV-SESSION VOLUME PROFILE: teal horizontal histogram growing right
+- *    from the session start; rows sit exactly on their price span (the
+- *    exact row pitch carried by the core is used -- no re-estimation);
+- *    value-area rows brighter; POC row gold; whisper-alpha VALUE-AREA BAND
+- *    from VAL to VAH across the session so value reads at a glance.
+- *  - HTF COMPOSITE PROFILE: dark-gold ghost histogram growing LEFT from
+- *    the session start (true mirror -- left-anchored positive-width rects,
+- *    never negative widths), + thick POC ray, dashed VAH/VAL.
+- *  - ZOOM-SCALING WIDTHS: histogram rows are sized in du (bar-index)
+- *    units by default so profiles scale with the chart like the reference
+- *    software. `scaledWidths=false` falls back to the px-width mode that
+- *    is empirically PROVEN to render (see fallback notes below).
+- *  - RIGHT-EDGE LABEL COLUMN: labels extend RIGHT of the last bar into
+- *    empty margin (rightMiddle -- the platform's leftMiddle extends text
+- *    LEFT, over the candles: that was v2's biggest legibility bug), and
+- *    run through a de-collision pass that stacks labels of nearby levels
+- *    at a fixed pixel pitch so they can never sit on each other.
+- *  - ACCUM rotation: gold box outline + gold histogram + level ray.
+- *  - LEG cluster ray (untested tag).
+- *  - MARKS with noise control: absorption/flow-quit stamps only for the
+- *    CURRENT session; older signals shrink to bare arrows (set
+- *    showHistory=true to label them again). Evidence tags are verbatim.
+- *  - SESSION START marker: subtle dashed vertical line at the day anchor,
+- *    so a wrong time anchor is visible immediately.
+- *  - ALIGNMENT SELF-TEST (alignTest=true): draws a magenta test row
+- *    centered on PREV POC through the same code path as every histogram
+- *    row. The white POC ray must bisect it. If the row sits entirely
+- *    ABOVE the ray, the platform's Rectangle y-anchor is top-left: set
+- *    RECT_Y_ANCHOR to "top" below (one line) and every row is fixed.
+- *  - STATUS BANNER pinned to the viewport top-left (always visible),
+- *    fixed line slots (no jumping), second line of key level numbers.
++ * VISUAL SUITE v4 -- field fixes from the 2026-08-09 live session
++ * (FIELD_REPORT.md, docs/bug/live_bug_opaque_va_band_2026-08-09.png),
++ * look modeled on Trader Dale's software (docs/reference/):
+  *
+- * Platform facts (verified): graphics via map() return on d.isLast();
+- * LineSegments (+infiniteEnd rays), Text (needs fontSize+fill), du/px/op
+- * coordinate helpers, origin{cs:'frame'} pins to viewport; leftMiddle
+- * extends text LEFT of the point, rightMiddle extends RIGHT; mixed-unit
+- * op() on the X axis of Line endpoints does not render; lineStyle.opacity
+- * kills the group (alpha lives inside rgba strings); graphics do not
+- * stretch autoscale; intra-bar state rolls back to last closed bar, so
+- * bars are committed once via the lastPushedMs guard + history walk-back
+- * (correct under both candidate live-engine models).
++ *  LIVE-VERIFIED FACTS driving this version:
++ *  - FILL ALPHA IS NOT HONORED for Rectangle fills: the v3 value-area band
++ *    (rgba alpha 0.07) rendered as a SOLID slab that swallowed the rows.
++ *    => every color in this file is a solid hex tuned for the dark theme;
++ *    nothing relies on translucency. Enforced by sim_synth.js.
++ *  - DU-UNIT RECTANGLE WIDTHS RENDER CORRECTLY: the band was strictly
++ *    duMode-gated, so duMode provably ran, and the du-width rows in the
++ *    screenshot tiled cleanly at exact prices. du widths are now the
++ *    proven default (zoom-scaling profiles); px mode kept as a toggle.
++ *  - BOOL PARAM VALUES DO NOT REACH this.props: the dialog showed
++ *    (20, false, false, false) yet duMode ran (scaledWidths fell back to
++ *    its undefined-default true) while alignTest stayed false (!!undefined)
++ *    -- both consistent ONLY with bool props arriving undefined.
++ *    => toggles are number specs (0/1), every prop is defensively coerced
++ *    (accepts true/'true'/1/'1'/...), effective values are re-derived on
++ *    every draw, and code defaults match intended behavior when props
++ *    never arrive. `diag=1` prints raw prop types on the banner so prop
++ *    delivery is observable, never assumed.
++ *
++ *  THE CHART (Dale reading experience -- docs/reference/dale_poc/item1,
++ *  item4; dale_orderflow/02,03):
++ *  - PREV-SESSION VOLUME PROFILE: dark-teal histogram growing right from
++ *    the session start; value-area rows a clearly brighter teal; POC row
++ *    solid gold. Rows tile their exact core-computed price spans.
++ *  - VALUE-AREA ZONE: dashed outline from session start to the current
++ *    bar between VAL and VAH (Dale's zone, drawn with proven line
++ *    primitives -- zero fill-alpha reliance) + white POC ray + dashed
++ *    blue VAH/VAL rays.
++ *  - HTF COMPOSITE: dark-gold ghost histogram mirrored LEFT of the
++ *    session start (left-anchored positive du widths), thick POC ray,
++ *    dash-dot VAH/VAL.
++ *  - Historical SESSION PROFILES: muted slate, one per session at its own
++ *    start. NAKED POC rays red until traded through.
++ *  - ACCUM rotation: gold box + dark-gold histogram + level ray; LEG ray
++ *    aqua (untested tag verbatim).
++ *  - RIGHT-EDGE LABELS: extend RIGHT of the last bar (leftMiddle extends
++ *    LEFT -- platform fact), de-collided by clustering + pixel fanning.
++ *  - MARKS: absorption diamonds current-session only (latest one labeled),
++ *    signal arrows always, full signal text current-session (showHistory=1
++ *    labels older ones), SL/TP rays for the live signal. Evidence tags
++ *    verbatim -- contractual honesty.
++ *  - SESSION START marker line; STATUS BANNER top-left with fixed slots;
++ *    alignTest=1 self-test row (RECT_Y_ANCHOR flip protocol below).
++ *
++ * Other platform facts respected (TraderMachell_Review_v2.md section 4):
++ * graphics only on d.isLast(), global:true + stable keys, Text needs
++ * fontSize+fill, no mixed-unit op() on X, no lineStyle.opacity, tmsList
++ * timestamp->index anchoring (never bar indexes, never history.get), bars
++ * committed once via lastPushedMs + walk-back (both engine models).
+  */
+ 
+ /* __CORE_SPLICE__ */
+@@ -57,48 +67,67 @@ const { px, du, op } = require("./tools/graphics");
+ 
+ // ---- render configuration ------------------------------------------------
+ // RECT_Y_ANCHOR: which edge of a Rectangle `position.y` names. "bottom"
+-// matches the one community indicator proven to render (it passes
+-// priceTop - binSize). If the alignTest row draws ABOVE its ray, the
+-// platform is top-anchored: flip this to "top". Single source of truth --
+-// every rectangle in the file goes through vrect()/hrect().
++// matched the live 2026-08-09 frame (gold POC row sat exactly at PREV POC
++// 4324.9). alignTest=1 re-verifies: if the magenta row ever draws ABOVE
++// its ray, flip this to "top". Single source of truth (vrect/pxrect).
+ const RECT_Y_ANCHOR = "bottom";
+ const VIS = {
+-  rowFill: 0.92,        // row height as fraction of its pitch (hairline gap)
++  rowFill: 0.90,        // row height as fraction of its pitch (hairline gap)
+   minRowBars: 0.35,     // du mode: shortest visible row, in bar widths
+   minRowPx: 3,          // px mode: shortest visible row, in pixels
+-  prevMaxBars: 180,     // du mode: longest prev-profile row (1-min bars)
+-  htfMaxBars: 150,      // du mode: longest HTF ghost row
+-  sessMaxBars: 110,     // du mode: longest per-session row
+-  accMaxBars: 110,      // du mode: longest ACCUM row (also capped by box)
+-  prevMaxPx: 160,       // px fallback widths (the v2 proven values)
++  prevMaxBars: 150,     // du mode: longest prev-profile row (1-min bars)
++  htfMaxBars: 120,      // du mode: longest HTF ghost row
++  sessMaxBars: 90,      // du mode: longest per-session row
++  accMaxBars: 90,       // du mode: longest ACCUM row (also capped by box)
++  prevMaxPx: 160,       // px fallback widths (proven v2 values)
+   sessMaxPx: 110,
+   accMaxPx: 90,
+   labelGapPx: 15,       // de-collision stack pitch
+   clusterATR: 0.25,     // labels closer than this (in ATR) share a stack
+ };
+ 
++// ALL colors are solid hex: fill alpha proved unreliable live (Bug A).
++// Values are tuned for Tradovate's dark chart theme at FULL opacity:
++// tails dark enough to recede behind price, VA a clear step brighter,
++// POC unmistakable.
+ const COLORS = {
+-  profile: "rgba(64,158,186,0.26)",     // teal tails (Dale's look)
+-  profileVA: "rgba(96,204,236,0.50)",   // brighter inside the value area
+-  pocRow: "rgba(255,203,54,0.95)",      // gold POC row
+-  vaBand: "rgba(96,204,236,0.07)",      // whisper value-area band
+-  sess: "rgba(122,134,170,0.18)",       // historical sessions: muted slate
+-  sessVA: "rgba(152,164,205,0.32)",
+-  sessPoc: "rgba(206,213,240,0.72)",
+-  htfGhost: "rgba(201,150,43,0.22)",    // HTF mirror rows
+-  htfPocRow: "rgba(201,150,43,0.70)",
+-  poc: "#FFFFFF", va: "#62A8E8",
++  profile: "#1F4B58",     // prev-session tails: dark teal, recedes
++  profileVA: "#3E7E93",   // value area: clearly brighter teal
++  pocRow: "#FFC42C",      // POC row: solid gold
++  sess: "#262C41",        // historical sessions: near-background slate
++  sessVA: "#3A4263",
++  sessPoc: "#8991BC",
++  htfGhost: "#4E3D12",    // HTF mirror: dark gold-brown
++  htfPocRow: "#A87E22",
++  accHist: "#5C4A16",     // ACCUM histogram body
++  accPocRow: "#E8E8E8",
++  poc: "#FFFFFF", va: "#62A8E8", vaZone: "#3D5F80",
+   htf: "#C9962B", accum: "#FFD54F", leg: "#26C6DA",
+   naked: "#E53935", nakedTxt: "#EF9A9A",
+   buy: "#00C853", sell: "#FF5252", tp: "#00C853", sl: "#FF5252",
+   absorb: "#FFA500", conflu: "#FF8C00", warn: "#FFA500",
+   status: "#E0E0E0", dim: "#9E9E9E",
+-  dayLine: "rgba(158,158,158,0.45)",
+-  test: "rgba(255,0,255,0.55)",
++  dayLine: "#565B66",
++  test: "#FF00FF",
+ };
+ const FONT = { fontSize: 13, fontWeight: "bold" };
+ const FONT_SM = { fontSize: 11, fontWeight: "bold" };
+ 
++// ---- defensive prop coercion (bool prop VALUES observed undelivered
++// live 2026-08-09; never trust platform prop types) -----------------------
++function pBool(v, dflt) {
++  if (v === undefined || v === null) return dflt;
++  if (v === true || v === false) return v;
++  const s = String(v).toLowerCase().trim();
++  if (s === "true" || s === "1" || s === "yes" || s === "on") return true;
++  if (s === "false" || s === "0" || s === "no" || s === "off" || s === "") return false;
++  return dflt;
++}
++function pNum(v, dflt) {
++  const n = Number(v);
++  return Number.isFinite(n) && n > 0 ? n : dflt;
++}
++
+ // ---- primitive helpers ---------------------------------------------------
+ function ray(key, x0, price, color, width, dash) {
+   return {
+@@ -150,15 +179,15 @@ function pxrect(x, wPx, pLo, pHi) {
+ }
+ 
+ // ---- histogram -----------------------------------------------------------
+-// Shapes->Rectangle rows, the pattern PROVEN to render (Rectangle
+-// primitives, du heights, alpha baked into rgba colors, global:true under
+-// isLast()). Each row uses the EXACT pitch carried by the core (r.h) --
+-// never an estimate -- so rows tile the profile's true price span.
+-//   duMode=true : widths in bar units (scale with zoom); dir=-1 mirrors
+-//                 LEFT via left-anchored positive-width rects.
+-//   duMode=false: px widths (v2 proven mode); leftward growth is NOT
+-//                 expressible without negative widths (unproven), so
+-//                 dir=-1 callers must skip in px mode.
++// Shapes->Rectangle rows. Each row uses the EXACT pitch carried by the core
++// (r.h) so rows tile the profile's true price span -- verified live
++// 2026-08-09 (rows outside the band tiled perfectly; the report calls them
++// "the standard").
++//   duMode=true : widths in bar units (scale with zoom; live-proven);
++//                 dir=-1 mirrors LEFT via left-anchored positive widths.
++//   duMode=false: px widths (v2 mode); leftward growth is NOT expressible
++//                 without negative widths (unproven), so dir=-1 callers
++//                 must skip in px mode.
+ function histogram(keyBase, rows, x0, dir, colorMain, colorVA, colorPoc, maxW, duMode) {
+   const groups = { main: [], va: [], poc: [] };
+   for (const r of rows) {
+@@ -187,7 +216,7 @@ function histogram(keyBase, rows, x0, dir, colorMain, colorVA, colorPoc, maxW, d
+     global: true, primitives: groups.poc, fillStyle: { color: colorPoc } });
+   return items;
+ }
+-function box(key, xA, xB, hi, lo, color) {
++function box(key, xA, xB, hi, lo, color, dash) {
+   return {
+     tag: "LineSegments", key, global: true,
+     lines: [
+@@ -196,15 +225,14 @@ function box(key, xA, xB, hi, lo, color) {
+       { tag: "Line", a: { x: du(xA), y: du(hi) }, b: { x: du(xA), y: du(lo) } },
+       { tag: "Line", a: { x: du(xB), y: du(hi) }, b: { x: du(xB), y: du(lo) } },
+     ],
+-    lineStyle: { lineWidth: 1, color, lineStyle: 3 },
++    lineStyle: { lineWidth: 1, color, lineStyle: dash || 3 },
+   };
+ }
+ 
+ // ---- right-edge label column with de-collision -----------------------------
+-// Collect {key, price, text, color, font} entries, then lay them out top to
+-// bottom. Labels whose prices sit within clusterATR of each other are drawn
+-// as one stack fanned around the cluster midpoint at a fixed pixel pitch,
+-// ordered by price -- close levels can never overprint each other.
++// Labels whose prices sit within clusterATR of each other form a stack
++// fanned around the cluster midpoint at a fixed pixel pitch, ordered by
++// price -- close levels can never overprint each other, at any zoom.
+ function layoutLabels(labels, lx, atr) {
+   const eps = Math.max(atr * VIS.clusterATR, 1e-9);
+   const sorted = labels.slice().sort((a, b) => b.price - a.price);
+@@ -244,13 +272,9 @@ class traderMachell {
+       legPivot: Math.max(3, Math.round(12 / barMin)),
+       sigBars: Math.max(3, Math.round(15 / barMin)),
+       initBars: Math.max(2, Math.round(5 / barMin)),
+-      htfSessions: (this.props && this.props.htfSessions) || 20,
++      htfSessions: pNum(this.props && this.props.htfSessions, 20),
+     });
+-    const p = this.props || {};
+-    this.optScaled = p.scaledWidths === undefined ? true : !!p.scaledWidths;
+-    this.optAlignTest = !!p.alignTest;
+-    this.optHistory = !!p.showHistory;
+-    // du-mode row caps, rescaled so a "row bar-width" tracks real time when
++    // du-mode row caps, rescaled so a row's bar-width tracks real time when
+     // the zoom buttons switch aggregation (Q1 resets the indicator anyway)
+     const cap = (b) => Math.max(20, Math.round(b / barMin));
+     this.wPrev = cap(VIS.prevMaxBars);
+@@ -268,6 +292,19 @@ class traderMachell {
+     // indexing quirks)
+   }
+ 
++  // effective options, re-derived EVERY draw from coerced props (field
++  // report requirement: never trust platform prop types or delivery; the
++  // defaults here are what actually runs when a prop never arrives)
++  _opts() {
++    const p = this.props || {};
++    return {
++      duMode: pBool(p.scaledWidths, true),   // du widths live-proven 2026-08-09
++      history: pBool(p.showHistory, false),
++      alignTest: pBool(p.alignTest, false),
++      diag: pBool(p.diag, false),
++    };
++  }
++
+   _pushEntity(e) {
+     const tMs = e.timestamp().getTime();
+     if (tMs <= this.lastPushedMs) return;
+@@ -344,7 +381,8 @@ class traderMachell {
+       return items;
+     }
+     if (!out) return items;
+-    const duMode = this.optScaled;
++    const O = this._opts();
++    const duMode = O.duMode;
+     const tcache = new Map();
+     // index of the last PUSHED bar: i if the current bar is committed,
+     // else i-1 (the developing bar is never pushed)
+@@ -378,10 +416,17 @@ class traderMachell {
+     if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
+     if (this.barMin !== 1)
+       ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
+-    if (ctx.length)
+-      items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
+-        out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.htf),
+-        FONT_SM));
++    ctx.push(duMode ? "[du]" : "[px]");     // effective mode, always visible
++    items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
++      out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
++      FONT_SM));
++    // prop-delivery diagnostics (field report: instrument, don't assume)
++    if (O.diag) {
++      const p = this.props || {};
++      const dump = ["htfSessions", "scaledWidths", "showHistory", "alignTest", "diag"]
++        .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
++      items.push(frameTxt("stat4", 70, 72, "props: " + dump, COLORS.dim, FONT_SM));
++    }
+ 
+     // ---- session start marker (verifies the time anchor at a glance) ----
+     if (out.prevProf && out.prevProf.length) {
+@@ -394,12 +439,12 @@ class traderMachell {
+       items.push(vline("dayLn", x0, pLo - ph, pHi + ph, COLORS.dayLine, 3));
+     }
+ 
+-    // ---- value-area band (VAL..VAH, whisper alpha, du mode only) ----
+-    if (duMode && out.prev && i > x0) {
+-      items.push({ tag: "Shapes", key: "vaB", global: true,
+-        primitives: [vrect(x0, (i - x0) + 2, out.prev.val, out.prev.vah)],
+-        fillStyle: { color: COLORS.vaBand } });
+-    }
++    // ---- value-area ZONE: dashed outline, session start -> now ----
++    // (v3 drew a filled band here; live 2026-08-09 proved fill alpha is
++    // not honored -- it rendered as an opaque slab occluding the rows.
++    // Dale's zone, rebuilt on proven line primitives.)
++    if (out.prev && i > x0)
++      items.push(box("vaZ", x0, i + 1, out.prev.vah, out.prev.val, COLORS.vaZone, 3));
+ 
+     // ---- HTF composite (dark gold ghost, true mirror: grows LEFT) ----
+     // px fallback cannot mirror left (negative widths are unproven), so the
+@@ -462,7 +507,7 @@ class traderMachell {
+       lab("hvalT", out.htf.val, "HTF VAL " + fmt(out.htf.val), COLORS.htf, FONT_SM);
+     }
+ 
+-    // ---- ACCUM rotation: box + gold histogram + level ray ----
++    // ---- ACCUM rotation: box + histogram + level ray ----
+     if (out.accum) {
+       const ia = idx(out.accum.start);
+       const ib = idx(out.accum.end);
+@@ -471,8 +516,7 @@ class traderMachell {
+         if (out.accum.rows) {
+           const wCap = duMode ? Math.min(this.wAcc, Math.max(10, ib - ia)) : VIS.accMaxPx;
+           items.push(...histogram("apro", out.accum.rows, ia, 1,
+-            "rgba(255,213,79,0.28)", "rgba(255,213,79,0.28)",
+-            "rgba(255,255,255,0.85)", wCap, duMode));
++            COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
+         }
+       }
+       items.push(ray("accL", ia !== undefined ? ia : x0, out.accum.level, COLORS.accum, 2, 1));
+@@ -493,7 +537,7 @@ class traderMachell {
+ 
+     // ---- marks: absorption, signals, flow-quit (noise-controlled) ----
+     // Current session: full detail. Prior sessions: signals shrink to bare
+-    // arrows (showHistory=true restores short labels); absorption and
++    // arrows (showHistory=1 restores short labels); absorption and
+     // flow-quit stamps are current-session only.
+     let lastSig = null, lastSigIdx, lastAbsorb = null, lastAbsorbIdx;
+     for (let m = 0; m < this.marks.length; m++) {
+@@ -524,7 +568,7 @@ class traderMachell {
+           (ev.long ? "  BUY " : "  SELL ") + ev.kind + " " + fmt(ev.entry) +
+           "  " + ev.tag + (ev.htf ? "  " + ev.htf : ""), col,
+           ev.long ? -26 : 26, FONT_SM, "centerMiddle"));
+-      else if (this.optHistory)
++      else if (O.history)
+         items.push(txt("sg" + mk.tMs, mi, ev.entry,
+           (ev.long ? "BUY " : "SELL ") + ev.kind, col,
+           ev.long ? -24 : 24, FONT_SM, "centerMiddle"));
+@@ -550,14 +594,14 @@ class traderMachell {
+     // path as every histogram row. The white PREV POC ray must bisect the
+     // magenta row. Row entirely ABOVE the ray => platform anchors rects at
+     // the TOP edge: set RECT_Y_ANCHOR = "top" and rebuild.
+-    if (this.optAlignTest && out.prev && out.prevProf && out.prevProf.length) {
++    if (O.alignTest && out.prev && out.prevProf && out.prevProf.length) {
+       const h = out.prevProf[0].h || 0.5;
+       const pLo = out.prev.poc - h / 2, pHi = out.prev.poc + h / 2;
+       items.push({ tag: "Shapes", key: "alnR", global: true,
+         primitives: [duMode ? vrect(x0, Math.max(10, Math.round((i - x0) / 3)), pLo, pHi)
+           : pxrect(x0, 80, pLo, pHi)],
+         fillStyle: { color: COLORS.test } });
+-      items.push(frameTxt("alnT", 70, 72,
++      items.push(frameTxt("alnT", 70, O.diag ? 90 : 72,
+         "ALIGN TEST: white POC ray must bisect the magenta row. Row ABOVE ray => set RECT_Y_ANCHOR='top'",
+         COLORS.test, FONT_SM));
+     }
+@@ -570,12 +614,10 @@ class traderMachell {
+   filter() { return true; }
+ }
+ 
+-// paramSpecs.bool is not in the verified platform-facts list; degrade to a
+-// 0/1 number spec if this build of the platform lacks it.
+-const boolSpec = (predef.paramSpecs && typeof predef.paramSpecs.bool === "function")
+-  ? predef.paramSpecs.bool
+-  : (dflt) => predef.paramSpecs.number(dflt ? 1 : 0, 1, 0);
+-
++// Toggles are NUMBER specs (0/1): boolean paramSpecs registered in the
++// settings dialog but their VALUES never reached this.props on live
++// (2026-08-09 session) -- number/period specs follow the documented
++// delivery path. Values are defensively coerced in _opts() regardless.
+ module.exports = {
+   name: "traderMachell",
+   description: "TraderMachell - Dale volume-profile model (tested grades)",
+@@ -585,12 +627,9 @@ module.exports = {
+   tags: ["TraderMachell"],
+   params: {
+     htfSessions: predef.paramSpecs.period(20),
+-    // DEFAULT false until du-unit rectangle WIDTHS are verified to render
+-    // on live data (px widths are the empirically proven mode; du widths
+-    // are Cursor's zoom-scaling upgrade -- flip on in the settings dialog
+-    // during the first live session and keep it if the profiles draw).
+-    scaledWidths: boolSpec(false),  // du-width rows (scale with zoom); off = proven px mode
+-    showHistory: boolSpec(false),   // label signals from prior sessions
+-    alignTest: boolSpec(false),     // one-time Rectangle y-anchor self-test
++    scaledWidths: predef.paramSpecs.number(1, 1, 0),  // 1 = du widths (live-proven, scale with zoom); 0 = px mode
++    showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
++    alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
++    diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner
+   },
+ };

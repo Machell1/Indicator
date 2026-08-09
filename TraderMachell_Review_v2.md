@@ -1,5 +1,11 @@
 # TraderMachell — Tradovate Custom Indicator: v3 Visual Layer (Audit + Overhaul)
 
+> **2026-08-09 update:** the embedded sources below snapshot **v3**. After the
+> first live session (see `FIELD_REPORT.md`), the visual layer was revised to
+> **v4** — the repo's `indicator/` directory is the source of truth, and
+> `docs/VISUAL_V4.md` documents the changes. **§4 below remains the living
+> platform-facts registry and has been updated with the live findings.**
+
 **From: Cursor (AI code review) — response to the 2026-08-09 review brief**
 **For: the TraderMachell project (gold futures volume-profile trading system)**
 **Date: 2026-08-09**
@@ -161,9 +167,11 @@ unchanged, both are expected to pass unmodified.
 - **Module contract**: CommonJS. `module.exports = { name, description, calculator, inputType: 'bars', areaChoice: 'overlay', tags, params }`. Calculator = ES6 class, `init()` + `map(d, i, history)`; `this.props/contractInfo/chartDescription` are assigned by the app. Only `./tools/*` and `lodash` are requirable.
 - **Bar data**: `d.timestamp() open() high() low() close() volume() offerVolume() bidVolume()`; undocumented but real: `d.index() isLast() isComplete() tradeDate() ticks()`. Delta = `offerVolume() - bidVolume()` (executed at ask minus at bid). NOTE: backtest grades were measured on upVolume−downVolume (corr 0.87, 24% identical) — disclosed in banner, do not remove that disclosure.
 - **Graphics** (only meaningful on `d.isLast()`, `global: true` + stable keys):
-  - **PROVEN to render**: `Shapes` with `Rectangle` primitives — `position {x: du(barIndex), y: du(price)}`, `size {width: px(N), height: du(priceSpan)}`, `fillStyle {color: 'rgba(...)'}` (alpha INSIDE the rgba string); `LineSegments` with `Line {a, b, infiniteEnd}` in pure du coords + `lineStyle {lineWidth, color, lineStyle: 1..5}`; `Text` with explicit `style {fontSize, fontWeight, fill}` (misses = invisible), `textAlignment` (note: `leftMiddle` extends text LEFT of the point; `rightMiddle` extends RIGHT), frame-pinning via `origin {cs:'frame', h:'left', v:'top'}` + px coords.
-  - **OBSERVED NOT to render**: mixed-unit `op(du, '+', px)` expressions on the X axis of Line endpoints; `opacity` property inside `lineStyle` (kills the group — bake alpha into rgba color instead).
-  - **UNVERIFIED, now behind a runtime toggle**: `size.width` in du units on Rectangles (v3's `scaledWidths=true` default). If profiles don't render on live, flip `scaledWidths=false` — that path emits exactly the v2-proven px pattern.
+  - **PROVEN to render**: `Shapes` with `Rectangle` primitives — `position {x: du(barIndex), y: du(price)}`, `size {width: px(N), height: du(priceSpan)}`, `fillStyle {color: ...}`; `LineSegments` with `Line {a, b, infiniteEnd}` in pure du coords + `lineStyle {lineWidth, color, lineStyle: 1..5}`; `Text` with explicit `style {fontSize, fontWeight, fill}` (misses = invisible), `textAlignment` (note: `leftMiddle` extends text LEFT of the point; `rightMiddle` extends RIGHT), frame-pinning via `origin {cs:'frame', h:'left', v:'top'}` + px coords.
+  - **PROVEN to render (live 2026-08-09)**: `size.width` in **du units** on Rectangles — the v3 rows in the bug screenshot are du-width rows and tiled perfectly (the VA band that also drew is strictly duMode-gated, so duMode provably ran). `scaledWidths=1` is now the default; `0` restores the px pattern.
+  - **OBSERVED NOT to render**: mixed-unit `op(du, '+', px)` expressions on the X axis of Line endpoints; `opacity` property inside `lineStyle` (kills the group).
+  - **OBSERVED BROKEN (live 2026-08-09)**: **alpha in `fillStyle.color` is NOT honored** — v3's `rgba(…,0.07)` VA band rendered as a solid opaque slab (`docs/bug/live_bug_opaque_va_band_2026-08-09.png`). Treat ALL fills as fully opaque; use solid hex colors tuned for the dark theme; never stack fills that must stay distinguishable. Enforced by `sim_synth.js` since v4.
+  - **OBSERVED BROKEN (live 2026-08-09)**: **`paramSpecs.bool` values never reach `this.props`** — the dialog rendered `(20, false, false, false)` yet `scaledWidths` behaved as its `undefined` code-default (duMode ran) while `alignTest` read false (`!!undefined`); both consistent only with bool props arriving `undefined`. Use `number` (0/1) or `period` specs, coerce defensively (`true/'true'/1/'1'/…`), and make code defaults the intended behavior. `diag=1` prints raw prop delivery on the banner.
 - **Q1 — zoom buttons change aggregation**: the chart's − / + buttons silently switch 1m→5m→…→1h and reset the indicator. History is loaded by PANNING left, not zooming.
 - **Q2 — history back-loading PREPENDS bars**: every absolute bar index shifts. NEVER store bar indexes across map calls. Current solution: store timestamps; resolve to indexes at draw time against `this.tmsList` (a mirror of pushed bars) by offset-from-the-end.
 - **Q3 — `history.get(k)` proved unreliable at draw time** on the live platform (all probes failed once, degrading anchors to the last bar). That is why the tmsList mirror exists. Do not reintroduce `history.get` for anchoring.
