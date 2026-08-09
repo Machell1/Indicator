@@ -94,3 +94,31 @@ fact from the v4 session.
 props after — the props dump is longer than the viewport and was clipping
 the anchor numbers off-screen (the load-bearing diagnostic). `i=` added.
 Deployed live 17:54 CDT; keep this ordering.
+
+---
+
+## 5. v6.2 live verification (deployed 18:22 CDT, same session)
+
+Diag with v6.2 running: `anchor=ok@2918 i=3002 base=0 mirror=3002 gap=0
+desync=0` -- the fields render, mirror tracks appends, no gaps, no
+re-index detected since this boot, session-start anchor exact.
+
+**Fixed live:** the PREV-session profile now anchors correctly at the
+17:00 CDT session start (it floated in the future grid under v6.1).
+
+**Still wrong:** the ACCUM box + gold histogram + a second session profile
+still render just right of the live edge (~x0/live-bar region, extending
+into the future grid), and the overshoot guard does NOT fire -- so those
+anchors now resolve to a wrong-but-legal index <= i (clustered near the
+live edge / x0 region), not an overshoot. The ACCUM window is from
+Thursday; its correct anchor is deep in the Friday candle region
+(tail-offset ~1150-1200 back from i). Hypothesis: the ACCUM/session
+resolution path still consumes a stored index (or resolves via a
+different helper than the one fixed), and the stored boot-frame numbers
+happen to land near the live edge instead of past it -- which is why the
+overshoot guard never trips. Note the guard as designed can only catch
+anchors > i; a "wrong but plausible" anchor is invisible to it. Consider
+cross-checking each layer's resolved anchor against its own timestamp
+via tail-offset (they should agree within a bar) and flagging
+`[anchor mismatch]` on divergence -- that catches wrongness anywhere in
+range, not just overshoot.
