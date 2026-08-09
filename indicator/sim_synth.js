@@ -180,29 +180,51 @@ for (const it of items) {
   }
 }
 
-// -- vertical alignment: prev-profile POC row must straddle the exact POC --
+// -- SVP layer: the current session's box holds the DEVELOPING profile
+// (default devProfile=1); the v4 prev projection must be absent --
 const core = A.inst.core;
 const span = pr => {
   const lo = pr.position.y.v;             // RECT_Y_ANCHOR === 'bottom'
   return [lo, lo + pr.size.height.v];
 };
-const pocRects = rectsOf('pproP');
-check(pocRects.length > 0, 'no POC row in prev profile');
-if (pocRects.length) {
-  const [lo, hi] = span(pocRects[0]);
-  check(lo <= core.prev.poc && core.prev.poc <= hi,
-    `POC row [${lo.toFixed(2)},${hi.toFixed(2)}] misses POC ${core.prev.poc.toFixed(2)}`);
+check(items.every(x => !x.key.startsWith('ppro')),
+  'prev-session projection drawn despite devProfile default');
+// independently recompute the developing profile with the engine's own
+// exports and grid convention -- the drawn dPOC must match EXACTLY
+const { buildProfile } = require('./dale_core.js');
+let dLo = Infinity, dHi = -Infinity;
+for (const b of core.dayBars) {
+  if (b.l < dLo) dLo = b.l;
+  if (b.h > dHi) dHi = b.h;
 }
-const profLo = core.prev.lo;
-let profHi = -Infinity;
-for (const k of core.prev.vol.keys())
-  profHi = Math.max(profHi, core.prev.lo + (k + 1) * core.prev.step);
-for (const k of ['pproM', 'pproV', 'pproP'])
-  for (const pr of rectsOf(k)) {
-    const [lo, hi] = span(pr);
-    check(lo >= profLo - core.prev.step && hi <= profHi + core.prev.step,
-      `prev row [${lo.toFixed(2)},${hi.toFixed(2)}] outside profile span`);
-  }
+const dProf = buildProfile(core.dayBars,
+  Math.max((dHi - dLo) / core.cfg.rows, 1e-9));
+check(!!dProf, 'reference developing profile failed to build');
+const dpocRay = items.find(x => x.key === 'dpocL');
+check(!!dpocRay, 'developing dPOC ray missing');
+if (dpocRay && dProf)
+  check(dpocRay.lines[0].a.y.v === dProf.poc,
+    `dPOC ray ${dpocRay.lines[0].a.y.v} != engine-math POC ${dProf.poc}`);
+for (const k of ['dvahL', 'dvalL'])
+  check(items.some(x => x.key === k), 'developing ray missing: ' + k);
+const dPocRects = rectsOf('dproP');
+check(dPocRects.length > 0, 'no POC row in developing profile');
+if (dPocRects.length && dProf) {
+  const [lo, hi] = span(dPocRects[0]);
+  check(lo <= dProf.poc && dProf.poc <= hi,
+    `dev POC row [${lo.toFixed(2)},${hi.toFixed(2)}] misses POC ${dProf.poc.toFixed(2)}`);
+}
+if (dProf) {
+  let profHi = -Infinity;
+  for (const k of dProf.vol.keys())
+    profHi = Math.max(profHi, dProf.lo + (k + 1) * dProf.step);
+  for (const k of ['dproM', 'dproV', 'dproP'])
+    for (const pr of rectsOf(k)) {
+      const [lo, hi] = span(pr);
+      check(lo >= dProf.lo - dProf.step && hi <= profHi + dProf.step,
+        `dev row [${lo.toFixed(2)},${hi.toFixed(2)}] outside profile span`);
+    }
+}
 
 // -- value-area ZONE: dashed outline (line primitives, never a fill --
 // live 2026-08-09 proved fill alpha is not honored), spans exactly
@@ -302,8 +324,9 @@ if (aln.length) {
     'part2: Text items missing style');
   const lab2 = items2.filter(x => x.tag === 'Text' && !x.origin &&
     x.textAlignment === 'rightMiddle');
-  // 11 clustered labels: PREV POC/VAH/VAL, 2 NPOC, HTF POC/VAH/VAL, LEG, TP, SL
-  check(lab2.length === 11, 'part2: expected 11 labels, got ' + lab2.length);
+  // 14 labels: PREV POC/VAH/VAL, 2 NPOC, HTF POC/VAH/VAL, LEG, TP, SL
+  // + developing dPOC/dVAH/dVAL (SVP layer)
+  check(lab2.length === 14, 'part2: expected 14 labels, got ' + lab2.length);
   const slots2 = new Set();
   let stacked = 0;
   for (const t of lab2) {
@@ -343,6 +366,19 @@ if (aln.length) {
     }
   }
   console.log('part3 px-fallback frame:    ' + it3.length + ' items');
+}
+
+// -- part 3b: devProfile=0 restores the v4 layout (prev projection at the
+// session start, no developing profile/levels). String prop again. --
+{
+  const P = runModel('A', 500, { htfSessions: 20, devProfile: '0' });
+  const it = P.lastResult && P.lastResult.graphics ? P.lastResult.graphics.items : [];
+  check(P.threw === 0, 'part3b: devProfile=0 threw');
+  check(it.some(x => x.key.startsWith('ppro')),
+    'part3b: prev projection missing with devProfile=0');
+  check(it.every(x => !x.key.startsWith('dpro') && x.key !== 'dpocL'),
+    'part3b: developing profile drawn despite devProfile=0');
+  console.log('part3b v4-layout frame:     ' + it.length + ' items');
 }
 
 // -- part 4: prop-coercion torture. Live 2026-08-09 proved prop delivery
