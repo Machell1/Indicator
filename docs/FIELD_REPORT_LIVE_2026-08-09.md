@@ -122,3 +122,36 @@ cross-checking each layer's resolved anchor against its own timestamp
 via tail-offset (they should agree within a bar) and flagging
 `[anchor mismatch]` on divergence -- that catches wrongness anywhere in
 range, not just overshoot.
+
+---
+
+## 6. v6.3 live verification (deployed 18:43 CDT, same session)
+
+Diag: `anchor=ok@2897 i=3001 base=0 mirror=3001 gap=0 desync=0
+acc=2879..897` -- v6.3 running, telemetry complete.
+
+**The decisive reading:** `acc=2879..897`. The ACCUM window is WITHIN the
+loaded history (start 2879 bars back ~= Thu evening, end 897 back ~= Fri
+~03:00) -- NOT `pre`, NOT a fresh overnight rotation. Both endpoints
+resolve in-range, and NO `[anchor mismatch]` flag fires. Yet the gold
+ACCUM histogram/box cluster still RENDERS at the live-edge / future-grid
+region (~x 610-730 on a 1366 viewport with the last candle at ~595), i.e.
+at du positions ~= i..i+150 instead of du ~= 122..2104 where indices
+(i-2879)..(i-897) belong.
+
+**Conclusion: resolution is now provably correct and cross-checked; the
+displacement survives in the RENDERING CONSUMERS of those resolved
+anchors.** Something between "anchor resolved" and "primitive emitted"
+re-derives or reuses a different x for these layers. Candidates to audit
+line-by-line: (a) any consumer still holding a cached/stale local variable
+from a previous frame's resolution; (b) width/second-coordinate arithmetic
+that ADDS an absolute index where a width was intended (e.g. x + ib
+instead of x + (ib - ia)); (c) a du() call receiving a bars-back value
+instead of an absolute index (2879 as an absolute du lands right of i on
+a 3001-bar chart -- which matches the observed positions almost exactly:
+du(2879)..du(2104+...) -- CHECK THIS FIRST: the cluster sits where the
+BARS-BACK numbers would land if drawn as absolute indexes).
+
+Note the near-coincidence: acc start 2879 bars-back vs cluster at du
+~2900-3050 on a 3001-bar chart. A bars-back/absolute-index unit confusion
+in the ACCUM/session consumers would produce exactly this geometry.
