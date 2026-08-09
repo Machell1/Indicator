@@ -42,8 +42,30 @@
  * TraderMachell.js (the single module you paste into Tradovate's
  * Indicator Editor).
  *
- * VISUAL SUITE v5 -- v4 field fixes + a native SESSION VOLUME PROFILE
- * layer (docs/VISUAL_V5_SVP.md). The SVP feature set follows the leading
+ * VISUAL SUITE v6 -- v5 + techniques learned from studying free community
+ * indicator sources (docs/VISUAL_V6_SOURCES.md; all code here is original,
+ * the studied repos are license-restricted and were used for technique
+ * discovery only):
+ *  - TRANSLUCENT VALUE-AREA FILL (vaFill=1, DEFAULT OFF until live-
+ *    verified): community indicators achieve real translucency through
+ *    the CUSTOM CANVAS PLOTTER pipeline (predef.plotters.custom ->
+ *    canvas.drawLine with a first-class `opacity` style), which is
+ *    independent of the graphics-items path where fill alpha proved
+ *    broken (live Bug A). One bar-wide vertical line per bar from VAL to
+ *    VAH shades the value area of every session on the chart. If the
+ *    indicator fails to LOAD after this version, delete the clearly
+ *    marked PLOTTER BLOCK at the bottom of the file -- everything else
+ *    is unaffected.
+ *  - HVN / LVN NODE TICKS (nodes=1, default): computed from THIS
+ *    project's locked profile math. LVNs use the engine's own
+ *    stopBehindLVN criterion (row volume < lvnFrac x POC volume), so the
+ *    ticks mark exactly where the engine sees low-volume structure;
+ *    HVNs are prominent local maxima. Display-only, capped, no labels.
+ *  - USER COLOR/OPACITY PARAMS for the fill layer (paramSpecs.color is
+ *    used by working community indicators), defensively coerced like
+ *    every other prop.
+ *
+ * v5: native SESSION VOLUME PROFILE layer (docs/VISUAL_V5_SVP.md). The SVP feature set follows the leading
  * free/open TradingView tools (developing POC/VAH/VAL updating live,
  * prior-session levels locked and extended, per-session histograms), but
  * ALL math is this project's own regression-locked engine: the developing
@@ -807,6 +829,7 @@ class DaleCore {
 const predef = require("./tools/predef");
 const meta = require("./tools/meta");
 const { px, du, op } = require("./tools/graphics");
+const plt = require("./tools/plotting");
 
 // ---- render configuration ------------------------------------------------
 // RECT_Y_ANCHOR: which edge of a Rectangle `position.y` names. "bottom"
@@ -1027,13 +1050,21 @@ class traderMachell {
     this.wAcc = cap(VIS.accMaxBars);
     this.lastPushedMs = 0;
     this.lastOut = null;
-    this.marks = [];              // {tMs, price, day, ev} -- NO indexes stored:
-    // the chart PREPENDS bars when older history loads, shifting every
-    // absolute index; anchors are resolved from timestamps at draw time
-    this.tmsList = [];            // pushed-bar timestamps, in order -- our
-    // own mirror of the chart's tail, used to turn timestamps into indexes
-    // by offset-from-the-end (immune to prepends AND to platform history
-    // indexing quirks)
+    this.marks = [];              // {tMs, price, day, ev} -- anchors are
+    // resolved from timestamps at draw time, never from stale indexes
+    this.tmsList = [];            // pushed-bar timestamps, in order
+    this.idxList = [];            // each bar's chart index AT PUSH TIME,
+    // normalized to frame-0 by idxBase. Two independent anchor paths:
+    //  - PRIMARY: idxList[pos] + idxBase. Each entry was read straight
+    //    off the platform when the bar was mapped, so it stays correct
+    //    even if the walk-back MISSED bars (Q3 -- the live 2026-08-09pm
+    //    right-shifted-histogram frame). Prepends (Q2) shift all indexes
+    //    uniformly; idxBase is re-measured from any already-pushed bar.
+    //  - CROSS-CHECK: offset-from-the-end of the mirror (the v2..v5
+    //    method), which assumes one push per chart bar. Disagreement
+    //    means the mirror missed bars -> flagged on the banner.
+    this.idxBase = 0;
+    this._desync = false;
   }
 
   // effective options, re-derived EVERY draw from coerced props (field
@@ -1044,10 +1075,62 @@ class traderMachell {
     return {
       duMode: pBool(p.scaledWidths, true),   // du widths live-proven 2026-08-09
       dev: pBool(p.devProfile, true),        // developing session profile (SVP)
+      nodes: pBool(p.nodes, true),           // HVN/LVN ticks on the prior profile
       history: pBool(p.showHistory, false),
       alignTest: pBool(p.alignTest, false),
       diag: pBool(p.diag, false),
     };
+  }
+
+  // ---- HVN / LVN nodes on the PRIOR-session profile (display-only) ----
+  // LVN: contiguous runs of rows below the engine's own stop criterion
+  // (row volume < lvnFrac x POC volume -- identical to stopBehindLVN), so
+  // a tick marks exactly where the engine sees a low-volume pocket.
+  // HVN: local maxima >= 60% of POC volume, at least 3 rows from the POC.
+  // Edge runs are excluded (profile tails are trivially thin), counts are
+  // capped, recomputed once per session (cached by day).
+  _nodesOf(out) {
+    const prof = this.core.prev;
+    if (!prof) return null;
+    const N = this._nd;
+    if (N && N.day === out.day) return N;
+    const keys = [...prof.vol.keys()].sort((a, b) => a - b);
+    const res = { day: out.day, lvns: [], hvns: [] };
+    this._nd = res;
+    if (!keys.length) return res;
+    const kLo = keys[0], kHi = keys[keys.length - 1];
+    const pocV = prof.vol.get(prof.pocRow) || 0;
+    if (pocV <= 0) return res;
+    const v = k => prof.vol.get(k) || 0;
+    const lvnCut = CFG.lvnFrac * pocV;
+    // LVN runs (missing rows count as zero volume)
+    let runA = null;
+    const runs = [];
+    for (let k = kLo; k <= kHi + 1; k++) {
+      const low = k <= kHi && v(k) < lvnCut;
+      if (low && runA === null) runA = k;
+      else if (!low && runA !== null) { runs.push([runA, k - 1]); runA = null; }
+    }
+    for (const [a, b] of runs) {
+      if (a <= kLo || b >= kHi) continue;          // edge tails excluded
+      let depth = Infinity;
+      for (let k = a; k <= b; k++) if (v(k) < depth) depth = v(k);
+      res.lvns.push({ price: prof.lo + ((a + b + 1) / 2) * prof.step, depth });
+    }
+    res.lvns.sort((x, y) => x.depth - y.depth);    // deepest pockets first
+    res.lvns = res.lvns.slice(0, 4);
+    // HVN local maxima
+    for (let k = kLo + 1; k < kHi; k++) {
+      if (Math.abs(k - prof.pocRow) < 3) continue; // the POC row owns its zone
+      const vk = v(k);
+      if (vk < 0.6 * pocV) continue;
+      if (vk >= v(k - 1) && vk >= v(k + 1) &&
+          vk >= v(k - 2) && vk >= v(k + 2))
+        res.hvns.push({ price: prof.lo + (k + 0.5) * prof.step, vol: vk });
+    }
+    res.hvns.sort((x, y) => y.vol - x.vol);
+    res.hvns = res.hvns.slice(0, 3);
+    return res;
   }
 
   // ---- developing session profile (SVP layer, display-only) ----
@@ -1081,7 +1164,7 @@ class traderMachell {
     return dev.ok ? dev : null;
   }
 
-  _pushEntity(e) {
+  _pushEntity(e, chartIdx) {
     const tMs = e.timestamp().getTime();
     if (tMs <= this.lastPushedMs) return;
     this.lastPushedMs = tMs;
@@ -1092,7 +1175,11 @@ class traderMachell {
       vol: e.volume(), delta: off - bid,
     };
     this.tmsList.push(tMs);
-    if (this.tmsList.length > 12000) this.tmsList.splice(0, 2000);
+    this.idxList.push(chartIdx - this.idxBase);
+    if (this.tmsList.length > 12000) {
+      this.tmsList.splice(0, 2000);
+      this.idxList.splice(0, 2000);
+    }
     const out = this.core.push(bar);
     this.lastOut = out;
     if (out.absorb)
@@ -1106,30 +1193,54 @@ class traderMachell {
   }
 
   map(d, i, history) {
+    // prepend rebase (Q2): a bar we have ALREADY pushed reveals its
+    // current chart index; any shift versus what we stored means history
+    // back-loading moved every index -- re-measure the frame offset so
+    // stored indexes stay true. The current bar covers the common case...
+    const dMs = d.timestamp().getTime();
+    if (this.idxList.length && dMs === this.lastPushedMs)
+      this.idxBase = i - this.idxList[this.idxList.length - 1];
     if (history && typeof history.get === "function" && i > 0) {
-      let k = i - 1, backlog = [];
+      let k = i - 1;
+      const backlog = [], idxs = [];
       while (k >= 0 && backlog.length < 500) {
         const e = history.get(k);
         if (!e || typeof e.timestamp !== "function") break;
-        if (e.timestamp().getTime() <= this.lastPushedMs) break;
+        const eMs = e.timestamp().getTime();
+        if (eMs <= this.lastPushedMs) {
+          // ...and the walk-back boundary covers the engine model where
+          // closed bars are never re-mapped directly
+          if (this.idxList.length && eMs === this.lastPushedMs)
+            this.idxBase = k - this.idxList[this.idxList.length - 1];
+          break;
+        }
         backlog.push(e);
+        idxs.push(k);
         k--;
       }
       for (let b = backlog.length - 1; b >= 0; b--)
-        this._pushEntity(backlog[b]);
+        this._pushEntity(backlog[b], idxs[b]);
     }
     const complete = typeof d.isComplete === "function" ? d.isComplete() : !d.isLast();
-    if (complete) this._pushEntity(d);
+    if (complete) this._pushEntity(d, i);
 
-    if (!d.isLast()) return {};
-    return { graphics: { items: this.buildItems(d, i, history) } };
+    // per-bar values consumed by the optional canvas plotter (vaFill):
+    // each bar carries ITS session's prior value area, so the plotter can
+    // shade the value area of every session on the chart. Plain data --
+    // with no `plots` declared the platform draws nothing by itself
+    // (community-indicator precedent).
+    const prev = this.lastOut && this.lastOut.prev;
+    const vaVals = prev ? { vaLo: prev.val, vaHi: prev.vah } : {};
+
+    if (!d.isLast()) return vaVals;
+    return Object.assign({ graphics: { items: this.buildItems(d, i, history) } }, vaVals);
   }
 
-  // resolve a bar-start timestamp to its CURRENT chart index. The pushed
-  // bars are exactly the chart's TAIL (one per closed chart bar, in
-  // order), so a timestamp's offset from the end of tmsList equals its
-  // offset from the end of the chart -- valid regardless of how many old
-  // bars the chart prepends, and using no platform history APIs at all.
+  // resolve a bar-start timestamp to its CURRENT chart index.
+  // PRIMARY: the chart index recorded when the bar was pushed (frame-0
+  // normalized) + the current prepend base -- correct even if the mirror
+  // missed bars. CROSS-CHECK: tail-offset (one push per chart bar); a
+  // disagreement means the mirror is gappy (Q3) and is flagged visibly.
   _idxOf(tMs, endIdx, cache) {
     if (cache.has(tMs)) return cache.get(tMs);
     const L = this.tmsList;
@@ -1141,8 +1252,13 @@ class traderMachell {
         const mid = (lo + hi) >> 1;
         if (L[mid] < tMs) lo = mid + 1; else hi = mid;
       }
-      res = (L[lo] === tMs) ? endIdx - (L.length - 1 - lo) : undefined;
-      if (res !== undefined && res < 0) res = undefined;
+      if (L[lo] !== tMs) res = undefined;
+      else {
+        res = this.idxList[lo] + this.idxBase;
+        const tail = endIdx - (L.length - 1 - lo);
+        if (tail !== res) this._desync = true;
+        if (res < 0) res = undefined;
+      }
     }
     cache.set(tMs, res);
     return res;
@@ -1163,9 +1279,21 @@ class traderMachell {
     // index of the last PUSHED bar: i if the current bar is committed,
     // else i-1 (the developing bar is never pushed)
     const endIdx = this.lastPushedMs === d.timestamp().getTime() ? i : i - 1;
+    this._desync = false;
     const idx = t => this._idxOf(t, endIdx, tcache);
-    let x0 = idx(out.dayStartTms);
-    if (x0 === undefined) x0 = Math.max(0, i - 60);
+    // OCCLUSION RULE (live 2026-08-09 afternoon frame): a histogram may
+    // never be placed relative to the LAST bar and may never paint over
+    // the live edge. If the session-start anchor cannot be resolved,
+    // histograms/zone/ticks are hidden (rays and labels stay -- levels
+    // are horizontal and thin) and the banner says why. When resolved,
+    // right-growing session histograms are width-capped so they stop
+    // short of the final candles.
+    const x0 = idx(out.dayStartTms);
+    const x0Ok = x0 !== undefined;
+    const rayX0 = x0Ok ? x0 : 0;            // levels anchor at the chart edge
+    const availBars = x0Ok ? (i - x0 - 12) : 0;
+    const histOk = x0Ok && availBars >= 8;
+    const capW = w => Math.min(w, availBars);
     const lx = i + 4;                       // label column, right of last bar
     const labels = [];                      // -> layoutLabels at the end
     const lab = (key, price, text, color, font) =>
@@ -1192,6 +1320,8 @@ class traderMachell {
     if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
     if (this.barMin !== 1)
       ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
+    if (!x0Ok) ctx.push("[anchor unresolved - profiles hidden]");
+    if (this._desync) ctx.push("[mirror desync]");
     ctx.push(duMode ? "[du]" : "[px]");     // effective mode, always visible
     items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
       out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
@@ -1201,11 +1331,14 @@ class traderMachell {
       const p = this.props || {};
       const dump = ["htfSessions", "scaledWidths", "showHistory", "alignTest", "diag"]
         .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
-      items.push(frameTxt("stat4", 70, 72, "props: " + dump, COLORS.dim, FONT_SM));
+      items.push(frameTxt("stat4", 70, 72, "props: " + dump +
+        "   anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
+        " base=" + this.idxBase + " mirror=" + this.tmsList.length,
+        COLORS.dim, FONT_SM));
     }
 
     // ---- session start marker (verifies the time anchor at a glance) ----
-    if (out.prevProf && out.prevProf.length) {
+    if (x0Ok && out.prevProf && out.prevProf.length) {
       let pLo = Infinity, pHi = -Infinity, ph = 0;
       for (const r of out.prevProf) {
         if (r.price < pLo) pLo = r.price;
@@ -1219,13 +1352,13 @@ class traderMachell {
     // (v3 drew a filled band here; live 2026-08-09 proved fill alpha is
     // not honored -- it rendered as an opaque slab occluding the rows.
     // Dale's zone, rebuilt on proven line primitives.)
-    if (out.prev && i > x0)
+    if (x0Ok && out.prev && i > x0)
       items.push(box("vaZ", x0, i + 1, out.prev.vah, out.prev.val, COLORS.vaZone, 3));
 
     // ---- HTF composite (dark gold ghost, true mirror: grows LEFT) ----
     // px fallback cannot mirror left (negative widths are unproven), so the
     // ghost is du-mode only; rays + labels always draw.
-    if (duMode && out.htfRows && x0 > 2) {
+    if (x0Ok && duMode && out.htfRows && x0 > 2) {
       items.push(...histogram("hpro", out.htfRows, x0, -1,
         COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow, this.wHtf, true));
     }
@@ -1251,28 +1384,48 @@ class traderMachell {
     // devProfile=0: v4 layout -- prior-session histogram projected here.
     const dev = O.dev ? this._devProfile(out) : null;
     if (dev) {
-      items.push(...histogram("dpro", dev.rows, x0, 1,
-        COLORS.profile, COLORS.profileVA, COLORS.pocRow,
-        duMode ? this.wPrev : VIS.prevMaxPx, duMode));
-      items.push(ray("dpocL", x0, dev.poc, COLORS.dev, 2, 2));
+      if (histOk)
+        items.push(...histogram("dpro", dev.rows, x0, 1,
+          COLORS.profile, COLORS.profileVA, COLORS.pocRow,
+          duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
+      items.push(ray("dpocL", rayX0, dev.poc, COLORS.dev, 2, 2));
       lab("dpocT", dev.poc, "dPOC " + fmt(dev.poc), COLORS.dev, FONT_SM);
-      items.push(ray("dvahL", x0, dev.vah, COLORS.dev, 1, 5));
+      items.push(ray("dvahL", rayX0, dev.vah, COLORS.dev, 1, 5));
       lab("dvahT", dev.vah, "dVAH " + fmt(dev.vah), COLORS.dev, FONT_SM);
-      items.push(ray("dvalL", x0, dev.val, COLORS.dev, 1, 5));
+      items.push(ray("dvalL", rayX0, dev.val, COLORS.dev, 1, 5));
       lab("dvalT", dev.val, "dVAL " + fmt(dev.val), COLORS.dev, FONT_SM);
-    } else if (!O.dev && out.prevProf) {
+    } else if (!O.dev && out.prevProf && histOk) {
       items.push(...histogram("ppro", out.prevProf, x0, 1,
         COLORS.profile, COLORS.profileVA, COLORS.pocRow,
-        duMode ? this.wPrev : VIS.prevMaxPx, duMode));
+        duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
     }
     if (out.prev) {
       const thin = out.prev.liquid ? "" : "  [THIN - no signals]";
-      items.push(ray("pocL", x0, out.prev.poc, COLORS.poc, 3, 1));
+      items.push(ray("pocL", rayX0, out.prev.poc, COLORS.poc, 3, 1));
       lab("pocT", out.prev.poc, "PREV POC " + fmt(out.prev.poc) + thin, COLORS.poc);
-      items.push(ray("vahL", x0, out.prev.vah, COLORS.va, 1, 3));
+      items.push(ray("vahL", rayX0, out.prev.vah, COLORS.va, 1, 3));
       lab("vahT", out.prev.vah, "VAH " + fmt(out.prev.vah), COLORS.va, FONT_SM);
-      items.push(ray("valL", x0, out.prev.val, COLORS.va, 1, 3));
+      items.push(ray("valL", rayX0, out.prev.val, COLORS.va, 1, 3));
       lab("valT", out.prev.val, "VAL " + fmt(out.prev.val), COLORS.va, FONT_SM);
+    }
+
+    // ---- HVN / LVN node ticks, projected from the session start ----
+    // Short, quiet ticks: dark red = low-volume pocket (where the engine's
+    // stopBehindLVN sees structure), pale gold = high-volume node.
+    if (O.nodes && x0Ok) {
+      const nd = this._nodesOf(out);
+      if (nd && (nd.lvns.length || nd.hvns.length)) {
+        const tick = pr => ({ tag: "Line",
+          a: { x: du(x0), y: du(pr) }, b: { x: du(x0 + 6), y: du(pr) } });
+        if (nd.lvns.length)
+          items.push({ tag: "LineSegments", key: "ndL", global: true,
+            lines: nd.lvns.map(n => tick(n.price)),
+            lineStyle: { lineWidth: 3, color: "#8A4A50" } });
+        if (nd.hvns.length)
+          items.push({ tag: "LineSegments", key: "ndH", global: true,
+            lines: nd.hvns.map(n => tick(n.price)),
+            lineStyle: { lineWidth: 3, color: "#B0A060" } });
+      }
     }
 
     // ---- naked POC rays (Dale's signature: red, extended until tested) ----
@@ -1283,19 +1436,20 @@ class traderMachell {
         const ix = idx(np.endTms);
         // keyed by session end time, not list position: entries shift as
         // rays get tested, and positional keys would swap identities
-        items.push(ray("nk" + np.endTms, ix !== undefined ? ix : Math.max(0, x0 - 200),
+        items.push(ray("nk" + np.endTms, ix !== undefined ? ix : Math.max(0, rayX0 - 200),
           np.poc, COLORS.naked, 1, 1));
         lab("nkT" + np.endTms, np.poc, "NPOC " + fmt(np.poc), COLORS.nakedTxt, FONT_SM);
       }
     }
 
     if (out.htf) {
-      items.push(ray("hpocL", Math.max(0, x0 - 40), out.htf.poc, COLORS.htf, 3, 1));
+      const hx = Math.max(0, rayX0 - 40);
+      items.push(ray("hpocL", hx, out.htf.poc, COLORS.htf, 3, 1));
       lab("hpocT", out.htf.poc,
         "HTF POC " + fmt(out.htf.poc) + " (" + out.htf.sessions + "s)", COLORS.htf);
-      items.push(ray("hvahL", Math.max(0, x0 - 40), out.htf.vah, COLORS.htf, 1, 4));
+      items.push(ray("hvahL", hx, out.htf.vah, COLORS.htf, 1, 4));
       lab("hvahT", out.htf.vah, "HTF VAH " + fmt(out.htf.vah), COLORS.htf, FONT_SM);
-      items.push(ray("hvalL", Math.max(0, x0 - 40), out.htf.val, COLORS.htf, 1, 4));
+      items.push(ray("hvalL", hx, out.htf.val, COLORS.htf, 1, 4));
       lab("hvalT", out.htf.val, "HTF VAL " + fmt(out.htf.val), COLORS.htf, FONT_SM);
     }
 
@@ -1311,7 +1465,7 @@ class traderMachell {
             COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
         }
       }
-      items.push(ray("accL", ia !== undefined ? ia : x0, out.accum.level, COLORS.accum, 2, 1));
+      items.push(ray("accL", ia !== undefined ? ia : rayX0, out.accum.level, COLORS.accum, 2, 1));
       lab("accT", out.accum.level,
         "ACCUM " + fmt(out.accum.level) +
         (out.accum.short ? "  SELL retest" : "  BUY retest") +
@@ -1320,7 +1474,7 @@ class traderMachell {
 
     // ---- LEG cluster ----
     if (out.leg) {
-      items.push(ray("legL", x0, out.leg.level, COLORS.leg, 1, 1));
+      items.push(ray("legL", rayX0, out.leg.level, COLORS.leg, 1, 1));
       lab("legT", out.leg.level,
         "LEG " + fmt(out.leg.level) +
         (out.leg.down ? "  SELL retest" : "  BUY retest") + "  [untested]",
@@ -1386,7 +1540,7 @@ class traderMachell {
     // path as every histogram row. The white PREV POC ray must bisect the
     // magenta row. Row entirely ABOVE the ray => platform anchors rects at
     // the TOP edge: set RECT_Y_ANCHOR = "top" and rebuild.
-    if (O.alignTest && out.prev && out.prevProf && out.prevProf.length) {
+    if (O.alignTest && x0Ok && out.prev && out.prevProf && out.prevProf.length) {
       const h = out.prevProf[0].h || 0.5;
       const pLo = out.prev.poc - h / 2, pHi = out.prev.poc + h / 2;
       items.push({ tag: "Shapes", key: "alnR", global: true,
@@ -1406,6 +1560,36 @@ class traderMachell {
   filter() { return true; }
 }
 
+// ---- PLOTTER BLOCK (optional translucent value-area fill) ----
+// The custom-plotter pipeline (canvas.drawLine with a first-class
+// `opacity` style) is how working community indicators render real
+// translucency -- independent of the graphics-items path where fill
+// alpha is broken (live Bug A). Draws one bar-wide vertical line per bar
+// from that bar's session VAL to VAH. Gated by vaFill (DEFAULT OFF until
+// live-verified). Defensive throughout: a failure here must never take
+// the chart down. ROLLBACK: if the indicator fails to LOAD after adding
+// this version, delete this block and the `plotter` key in
+// module.exports below.
+function vaFillPlotter(canvas, instance, history) {
+  try {
+    const props = instance.props || {};
+    if (!pBool(props.vaFill, false)) return;
+    const color = (typeof props.vaFillColor === "string" && props.vaFillColor)
+      ? props.vaFillColor : "#3E7E93";
+    let opac = Number(props.vaFillOpacity);
+    if (!Number.isFinite(opac)) opac = 18;
+    opac = Math.max(0, Math.min(100, opac)) / 100;
+    if (opac <= 0) return;
+    for (let i = 0; i < history.data.length; i++) {
+      const item = history.get(i);
+      if (!item || item.vaLo === undefined || item.vaHi === undefined) continue;
+      const x = plt.x.get(item);
+      canvas.drawLine(plt.offset(x, item.vaLo), plt.offset(x, item.vaHi),
+        { color, relativeWidth: 1, opacity: opac });
+    }
+  } catch (e) { /* optional layer: swallow, never break the chart */ }
+}
+
 // Toggles are NUMBER specs (0/1): boolean paramSpecs registered in the
 // settings dialog but their VALUES never reached this.props on live
 // (2026-08-09 session) -- number/period specs follow the documented
@@ -1421,8 +1605,15 @@ module.exports = {
     htfSessions: predef.paramSpecs.period(20),
     scaledWidths: predef.paramSpecs.number(1, 1, 0),  // 1 = du widths (live-proven, scale with zoom); 0 = px mode
     devProfile: predef.paramSpecs.number(1, 1, 0),    // 1 = developing session profile + dPOC/dVAH/dVAL (SVP); 0 = v4 layout
+    nodes: predef.paramSpecs.number(1, 1, 0),         // 1 = HVN/LVN ticks on the prior profile
+    vaFill: predef.paramSpecs.number(0, 1, 0),        // 1 = translucent VA fill via canvas plotter (verify live first)
+    vaFillColor: predef.paramSpecs.color("#3E7E93"),  // fill color (plotter honors real opacity)
+    vaFillOpacity: predef.paramSpecs.number(18, 1, 0),// fill opacity, 0..100
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner
   },
+  plotter: [
+    predef.plotters.custom(vaFillPlotter),
+  ],
 };
