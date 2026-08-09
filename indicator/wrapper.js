@@ -112,7 +112,10 @@
 const predef = require("./tools/predef");
 const meta = require("./tools/meta");
 const { px, du, op } = require("./tools/graphics");
-const plt = require("./tools/plotting");
+// plotting helpers power the OPTIONAL vaFill canvas plotter only; if this
+// require fails on some platform build, the indicator must still load
+let plt = null;
+try { plt = require("./tools/plotting"); } catch (e) { /* vaFill disabled */ }
 
 // ---- render configuration ------------------------------------------------
 // RECT_Y_ANCHOR: which edge of a Rectangle `position.y` names. "bottom"
@@ -322,7 +325,9 @@ class traderMachell {
       legPivot: Math.max(3, Math.round(12 / barMin)),
       sigBars: Math.max(3, Math.round(15 / barMin)),
       initBars: Math.max(2, Math.round(5 / barMin)),
-      htfSessions: pNum(this.props && this.props.htfSessions, 20),
+      // core builds no HTF composite below 5 sessions (dale_core "< 5"
+      // gate) -- clamp so a dialog value of 1-4 can't silently starve it
+      htfSessions: Math.max(5, Math.round(pNum(this.props && this.props.htfSessions, 20))),
     });
     // du-mode row caps, rescaled so a row's bar-width tracks real time when
     // the zoom buttons switch aggregation (Q1 resets the indicator anyway)
@@ -331,6 +336,7 @@ class traderMachell {
     this.wHtf = cap(VIS.htfMaxBars);
     this.wSess = cap(VIS.sessMaxBars);
     this.wAcc = cap(VIS.accMaxBars);
+    this.vaBySession = {};   // sessionKey -> {vaLo, vaHi} for the vaFill plotter
     this.lastPushedMs = 0;
     this.lastOut = null;
     this.marks = [];              // {tMs, price, day, ev} -- anchors are
@@ -512,8 +518,17 @@ class traderMachell {
     // shade the value area of every session on the chart. Plain data --
     // with no `plots` declared the platform draws nothing by itself
     // (community-indicator precedent).
-    const prev = this.lastOut && this.lastOut.prev;
-    const vaVals = prev ? { vaLo: prev.val, vaHi: prev.vah } : {};
+    // resolve THIS bar's session VA from the bar's OWN timestamp. lastOut
+    // tracks the newest session, which stamps wrong values on bars mapped
+    // out of live order (model A re-maps closed bars; model B's first bar
+    // of a session is last mapped before the roll commits). The per-session
+    // map fills once per session during the oldest-first load and re-fills
+    // identically after any prepend-triggered re-init.
+    const out0 = this.lastOut;
+    if (out0 && out0.prev && out0.dayStartTms)
+      this.vaBySession[sessionKey(out0.dayStartTms)] =
+        { vaLo: out0.prev.val, vaHi: out0.prev.vah };
+    const vaVals = this.vaBySession[sessionKey(d.timestamp().getTime())] || {};
 
     if (!d.isLast()) return vaVals;
     return Object.assign({ graphics: { items: this.buildItems(d, i, history) } }, vaVals);
@@ -605,6 +620,10 @@ class traderMachell {
       ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
     if (!x0Ok) ctx.push("[anchor unresolved - profiles hidden]");
     if (this._desync) ctx.push("[mirror desync]");
+    // delta-proxy disclosure (registry section 4: grades were measured on
+    // up/down 1-min volume; live delta is the platform's bid/ask split,
+    // corr 0.87 -- this caveat must stay on the banner)
+    ctx.push("delta=bid/ask proxy (graded on up/down)");
     ctx.push(duMode ? "[du]" : "[px]");     // effective mode, always visible
     items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
       out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
@@ -612,7 +631,8 @@ class traderMachell {
     // prop-delivery diagnostics (field report: instrument, don't assume)
     if (O.diag) {
       const p = this.props || {};
-      const dump = ["htfSessions", "scaledWidths", "showHistory", "alignTest", "diag"]
+      const dump = ["htfSessions", "scaledWidths", "devProfile", "nodes",
+        "vaFill", "vaFillColor", "vaFillOpacity", "showHistory", "alignTest", "diag"]
         .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
       items.push(frameTxt("stat4", 70, 72, "props: " + dump +
         "   anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
@@ -642,8 +662,12 @@ class traderMachell {
     // px fallback cannot mirror left (negative widths are unproven), so the
     // ghost is du-mode only; rays + labels always draw.
     if (x0Ok && duMode && out.htfRows && x0 > 2) {
+      // cap the mirror's max width at x0 so no row's left edge lands on a
+      // negative du x (unproven coordinate region; shape is preserved --
+      // rows scale proportionally to the cap)
       items.push(...histogram("hpro", out.htfRows, x0, -1,
-        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow, this.wHtf, true));
+        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow,
+        Math.min(this.wHtf, x0), true));
     }
 
     // ---- per-session profiles (MarketProfile-style: one histogram per
@@ -653,7 +677,10 @@ class traderMachell {
         const sp = out.sessionProfiles[s];
         const six = idx(sp.start);
         if (six === undefined) continue;
-        items.push(...histogram("sp" + s, sp.rows, six, 1,
+        // keyed by the session's own start tms (not loop position): the
+        // slice window shifts at every 17:00 NY roll and positional keys
+        // would swap identity across all six profiles (the A8 defect class)
+        items.push(...histogram("sp" + sp.start, sp.rows, six, 1,
           COLORS.sess, COLORS.sessVA, COLORS.sessPoc,
           duMode ? this.wSess : VIS.sessMaxPx, duMode));
       }
@@ -668,8 +695,11 @@ class traderMachell {
     const dev = O.dev ? this._devProfile(out) : null;
     if (dev) {
       if (histOk)
+        // dev POC row wears the teal-green dev color, NOT the graded gold:
+        // gold is v4's visual signature for the graded PRIOR POC, and the
+        // developing dPOC carries no tested grade (evidence-honesty rule)
         items.push(...histogram("dpro", dev.rows, x0, 1,
-          COLORS.profile, COLORS.profileVA, COLORS.pocRow,
+          COLORS.profile, COLORS.profileVA, COLORS.dev,
           duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
       items.push(ray("dpocL", rayX0, dev.poc, COLORS.dev, 2, 2));
       lab("dpocT", dev.poc, "dPOC " + fmt(dev.poc), COLORS.dev, FONT_SM);
@@ -855,6 +885,7 @@ class traderMachell {
 // module.exports below.
 function vaFillPlotter(canvas, instance, history) {
   try {
+    if (!plt) return;   // ./tools/plotting unavailable on this build
     const props = instance.props || {};
     if (!pBool(props.vaFill, false)) return;
     const color = (typeof props.vaFillColor === "string" && props.vaFillColor)
@@ -863,7 +894,11 @@ function vaFillPlotter(canvas, instance, history) {
     if (!Number.isFinite(opac)) opac = 18;
     opac = Math.max(0, Math.min(100, opac)) / 100;
     if (opac <= 0) return;
-    for (let i = 0; i < history.data.length; i++) {
+    // cap the walk: one drawLine per bar over a deep-loaded 110k-bar
+    // history would hammer every repaint. ~20k 1-min bars = 2+ weeks of
+    // shading, far beyond what any zoom level shows at once.
+    const first = Math.max(0, history.data.length - 20000);
+    for (let i = first; i < history.data.length; i++) {
       const item = history.get(i);
       if (!item || item.vaLo === undefined || item.vaHi === undefined) continue;
       const x = plt.x.get(item);
@@ -890,13 +925,22 @@ module.exports = {
     devProfile: predef.paramSpecs.number(1, 1, 0),    // 1 = developing session profile + dPOC/dVAH/dVAL (SVP); 0 = v4 layout
     nodes: predef.paramSpecs.number(1, 1, 0),         // 1 = HVN/LVN ticks on the prior profile
     vaFill: predef.paramSpecs.number(0, 1, 0),        // 1 = translucent VA fill via canvas plotter (verify live first)
-    vaFillColor: predef.paramSpecs.color("#3E7E93"),  // fill color (plotter honors real opacity)
+    // paramSpecs.color is community-proven but unverified on OUR live
+    // build -- guard so its absence can't kill the whole module at load
+    // (the plotter falls back to #3E7E93 when the value isn't a string)
+    vaFillColor: (predef.paramSpecs && typeof predef.paramSpecs.color === "function")
+      ? predef.paramSpecs.color("#3E7E93")
+      : predef.paramSpecs.number(0, 1, 0),
     vaFillOpacity: predef.paramSpecs.number(18, 1, 0),// fill opacity, 0..100
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner
   },
-  plotter: [
-    predef.plotters.custom(vaFillPlotter),
-  ],
 };
+
+// plotter registration is the one construct Node cannot prove against the
+// live platform -- register conditionally so a missing/renamed plotters
+// API degrades to "no vaFill layer" instead of "no indicator at all"
+if (plt && predef.plotters && typeof predef.plotters.custom === "function") {
+  module.exports.plotter = [predef.plotters.custom(vaFillPlotter)];
+}
