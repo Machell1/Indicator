@@ -1108,6 +1108,7 @@ class traderMachell {
       history: pBool(p.showHistory, false),
       alignTest: pBool(p.alignTest, false),
       diag: pBool(p.diag, false),
+      calib: pBool(p.calib, false),          // du-axis calibration probe (section 9)
     };
   }
 
@@ -1887,6 +1888,48 @@ class traderMachell {
       }
     }
 
+    // ---- du-axis calibration probe (field report section 9) ----
+    // Construction-truth telemetry proved every emitted structure sits at
+    // sane bar indexes, yet the live render crosses the future grid: the
+    // remaining variable is the platform's du->pixel mapping under
+    // weekend-gap + pre-gridded-future conditions. These probes are thin
+    // labeled verticals at KNOWN du values -- one screenshot maps the
+    // empirical function. Each label rides its own line, so wherever the
+    // platform paints the line, the label names the du it was given.
+    // Emitted AFTER the future-grid scan on purpose: the i+60/i+300
+    // probes must reach into the future grid to measure it -- probes are
+    // the sanctioned exception to the guard. Probe first, transform
+    // second: no coordinate transforms are applied anywhere in this
+    // version.
+    if (O.calib) {
+      const cNow = d.close();
+      const half = (out.atr || 0) > 0 ? 5 * out.atr : cNow * 0.02;
+      const probes = [
+        ["i", i], ["i-100", i - 100], ["i-500", i - 500],
+        ["i-1000", i - 1000], ["i-2000", i - 2000], ["0", 0],
+        ["i+60", i + 60], ["i+300", i + 300],
+      ];
+      const seen = new Set();
+      let pn = 0;
+      for (const [nm, xv] of probes) {
+        const xP = Math.max(0, xv);
+        if (seen.has(xP)) continue;
+        seen.add(xP);
+        items.push(vline("calL" + nm, xP, cNow - half, cNow + half, COLORS.test, 1));
+        // vertical stagger: when the mapping bunches lines together the
+        // labels still read apart
+        items.push(txt("calT" + nm, xP, cNow + half - pn * (half / 4),
+          " du " + xP + " (" + nm + ")", COLORS.test, 0, FONT_SM));
+        pn++;
+      }
+      // price-anchored reference (the y axis is proven): a horizontal ray
+      // at the live close marks the live candle, so the du=i probe can be
+      // judged against it directly
+      items.push(ray("calC", 0, cNow, "#FFFFFF", 1, 2));
+      items.push(txt("calCT", lx, cNow, "LIVE CLOSE " + fmt(cNow),
+        "#FFFFFF", 30, FONT_SM));
+    }
+
     // ---- status banner, pinned to the viewport (fixed line slots) ----
     // Emitted LAST so every anchor-health flag raised during the item
     // builds above is reflected in THIS frame (frame-pinned text renders
@@ -1917,6 +1960,7 @@ class traderMachell {
       ctx.push("[future-grid item: " + [...futureKeys].sort().join(",") + "]");
     if (offscreen) ctx.push("[old anchors offscreen - load more bars]");
     if (this._desync) ctx.push("[mirror desync]");
+    if (O.calib) ctx.push("CALIB ACTIVE - each magenta line must stand on its bar");
     // delta-proxy disclosure (registry section 4: grades were measured on
     // up/down 1-min volume; live delta is the platform's bid/ask split,
     // corr 0.87 -- this caveat must stay on the banner)
@@ -1929,7 +1973,8 @@ class traderMachell {
     if (O.diag) {
       const p = this.props || {};
       const dump = ["htfSessions", "scaledWidths", "devProfile", "nodes",
-        "vaFill", "vaFillColor", "vaFillOpacity", "showHistory", "alignTest", "diag"]
+        "vaFill", "vaFillColor", "vaFillOpacity", "showHistory", "alignTest",
+        "diag", "calib"]
         .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
       // anchor state FIRST: it is the load-bearing diagnostic and the props
       // dump is long enough to clip off the right edge of the viewport
@@ -2028,6 +2073,7 @@ module.exports = {
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner
+    calib: predef.paramSpecs.number(0, 1, 0),         // 1 = du-axis calibration probe (one screenshot maps du->pixel)
   },
 };
 

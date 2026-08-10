@@ -1009,6 +1009,61 @@ if (aln.length) {
   console.log('part12 MP box rules:        pre-history, near-edge, full sp@ telemetry OK');
 }
 
+// -- part 13: du-axis calibration probe (field report section 9). Off by
+// default; when on (string prop), labeled verticals at exactly the
+// documented du values, labels riding their own lines, the i+60/i+300
+// probes surviving into the future grid (the sanctioned guard exception),
+// and the price-anchored live-close reference present. --
+{
+  const R13 = runModel('A', 400);
+  const inst = R13.inst;
+  const iLast = n - 1;
+  const frame13 = () => inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  // default off: zero probe items
+  check(frame13().every(x => !x.key.startsWith('cal')),
+    'part13: probe items drawn with calib off');
+  // on, worst-case string prop
+  inst.props = Object.assign({}, inst.props, { calib: '1' });
+  const it13 = frame13();
+  const want13 = {
+    'calLi': iLast, 'calLi-100': iLast - 100, 'calLi-500': iLast - 500,
+    'calLi-1000': iLast - 1000, 'calLi-2000': iLast - 2000, 'calL0': 0,
+    'calLi+60': iLast + 60, 'calLi+300': iLast + 300,
+  };
+  for (const k13 of Object.keys(want13)) {
+    const ln = it13.find(x => x.key === k13);
+    check(!!ln, 'part13: probe line missing: ' + k13);
+    if (ln) {
+      check(ln.lines[0].a.x.v === want13[k13],
+        `part13: ${k13} at ${ln.lines[0].a.x.v} != ${want13[k13]}`);
+      const lbl = it13.find(x => x.key === k13.replace('calL', 'calT'));
+      check(!!lbl && lbl.point.x.v === want13[k13],
+        'part13: label not riding its line: ' + k13);
+      check(!!lbl && lbl.text.indexOf('du ' + want13[k13]) >= 0,
+        'part13: label does not name its du value: ' + k13);
+    }
+  }
+  // the future probes must SURVIVE the emitted-geometry guard (sanctioned
+  // exception), and the guard must not have flagged them
+  const s313 = it13.find(x => x.key === 'stat3');
+  check(s313 && s313.text.indexOf('[future-grid') < 0,
+    'part13: probes tripped the future-grid flag');
+  check(s313 && s313.text.indexOf('CALIB ACTIVE') >= 0,
+    'part13: banner missing the calib marker');
+  // price-anchored live-close reference
+  const ref = it13.find(x => x.key === 'calC');
+  check(!!ref && ref.lines[0].a.y.v === bars[n - 1].c,
+    'part13: live-close reference missing or at wrong price');
+  check(it13.some(x => x.key === 'calCT'), 'part13: live-close label missing');
+  // no coordinate transform anywhere: emitted anchors are still raw du
+  // (probe-first discipline -- the dev profile anchor equals idx(dayStart))
+  const dayLn13 = it13.find(x => x.key === 'dayLn');
+  const wantX0 = inst._tailRef(inst.lastOut.dayStartTms, iLast);
+  check(!!dayLn13 && dayLn13.lines[0].a.x.v === wantX0,
+    'part13: a coordinate transform was applied before calibration');
+  console.log('part13 calibration probe:   gating, placement, future probes, reference OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;
