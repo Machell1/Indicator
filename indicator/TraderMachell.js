@@ -1191,12 +1191,38 @@ class traderMachell {
       this._reset(cdSize, null);
       return;
     }
-    // B) the feed is finer than the known period (stale-description case)
+    // B) observation is AUTHORITATIVE in both directions (community
+    // anchoring study item 1: chartDescription is only ever a hint --
+    // MTF Key Levels proves an indicator can be fully correct knowing
+    // nothing about its own timeframe).
     const per = this.barMin * 60e3;
+    // finer: one spacing below the period is proof (impossible on a
+    // legitimate feed)
     const finer = this._obsDeltas.filter(dl => dl < per);
     if (finer.length >= 1) {
       const inferred = Math.max(1, Math.round(Math.min.apply(null, finer) / 60e3));
-      this._reset(inferred, cdSize);
+      this._reset(inferred, cdSize !== inferred ? cdSize : null);
+      return;
+    }
+    // coarser: demands unanimity (six IDENTICAL deltas, each an exact
+    // >=2x minute multiple of the period) AND a disagreeing-or-absent
+    // description. The second condition is engine-safety, learned from
+    // the MUST-PASS gate: real overnight data CAN print six identical
+    // multi-minute gaps, and a false coarser reset wipes graded engine
+    // state mid-stream (signals diverge) -- while a missed coarse switch
+    // only mis-scales display slots. When the description AGREES with the
+    // current period, there is nothing to detect; when it disagrees (the
+    // stale-description class) or is absent, unanimity decides. This
+    // still closes the v9.1 residual gap: after a stale episode the
+    // description disagrees with the observed barMin by definition.
+    if ((cdSize === null || cdSize !== this.barMin) &&
+        this._obsDeltas.length >= 6) {
+      const d0 = this._obsDeltas[0];
+      if (d0 >= 2 * per && d0 % 60e3 === 0 &&
+          this._obsDeltas.every(x => x === d0)) {
+        const inferred = d0 / 60e3;
+        this._reset(inferred, cdSize !== inferred ? cdSize : null);
+      }
     }
   }
 
@@ -1642,17 +1668,6 @@ class traderMachell {
       }
       return r;
     };
-    // honest anchor for levels born BEFORE the loaded history: an old
-    // level truthfully extends from off-screen left, so its ray anchors
-    // at the chart edge (0). It must NEVER be pinned near x0 / the live
-    // edge -- that fabricates a plausible-looking wrong anchor, invisible
-    // to every guard (the live 2026-08-09 evening frame).
-    const oldAnchor = (t, layer) => {
-      const r = idx(t, layer);
-      if (r !== undefined) return r;
-      if (this.tmsList.length && t < this.tmsList[0]) offscreen = true;
-      return 0;
-    };
     // OCCLUSION RULE (live 2026-08-09 afternoon frame): a histogram may
     // never be placed relative to the LAST bar and may never paint over
     // the live edge. If the session-start anchor cannot be resolved,
@@ -1662,7 +1677,6 @@ class traderMachell {
     // short of the final candles.
     const x0 = idx(out.dayStartTms, "day");
     const x0Ok = x0 !== undefined;
-    const rayX0 = x0Ok ? x0 : 0;            // levels anchor at the chart edge
     const availBars = x0Ok ? (i - x0 - 12) : 0;
     const histOk = x0Ok && availBars >= 8;
     const capW = w => Math.min(w, availBars);
@@ -1670,6 +1684,18 @@ class traderMachell {
     const labels = [];                      // -> layoutLabels at the end
     const lab = (key, price, text, color, font) =>
       labels.push({ key, price, text, color, font });
+    // LEVEL-class line (community anchoring study item 2): a level's only
+    // information is its PRICE. Drawn full-width via infiniteStart with
+    // both endpoints at the live edge -- the two coordinates that are
+    // valid by construction on every frame -- so no prepend, re-index,
+    // trim, weekend gap or timeframe switch can ever mis-anchor it.
+    // Bounded right extension (study item 3) ends under the label column.
+    const lvl = (key, price, color, width, dash) =>
+      items.push({ tag: "LineSegments", key, global: true,
+        lines: [{ tag: "Line",
+          a: { x: duX(i - 1), y: du(price) }, b: { x: duX(i + 2), y: du(price) },
+          infiniteStart: true }],
+        lineStyle: { lineWidth: width, color, lineStyle: dash || 1 } });
     const fmt = p => (this.contractInfo && this.contractInfo.tickSize < 0.01)
       ? p.toFixed(3) : p.toFixed(1);
     // TIMEFRAME_ANCHORING_SPEC.md section 3B (constrain + disclose): every
@@ -1881,11 +1907,11 @@ class traderMachell {
         items.push(...histogram("dpro", dev.rows, x0, 1,
           COLORS.profile, COLORS.profileVA, COLORS.dev,
           duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
-      items.push(ray("dpocL", rayX0, dev.poc, COLORS.dev, 2, 2));
+      lvl("dpocL", dev.poc, COLORS.dev, 2, 2);
       lab("dpocT", dev.poc, "dPOC " + fmtL(dev.poc), COLORS.dev, FONT_SM);
-      items.push(ray("dvahL", rayX0, dev.vah, COLORS.dev, 1, 5));
+      lvl("dvahL", dev.vah, COLORS.dev, 1, 5);
       lab("dvahT", dev.vah, "dVAH " + fmtL(dev.vah), COLORS.dev, FONT_SM);
-      items.push(ray("dvalL", rayX0, dev.val, COLORS.dev, 1, 5));
+      lvl("dvalL", dev.val, COLORS.dev, 1, 5);
       lab("dvalT", dev.val, "dVAL " + fmtL(dev.val), COLORS.dev, FONT_SM);
     } else if (!O.dev && out.prevProf && histOk) {
       // v4-layout projection of the prior session at today's start,
@@ -1919,11 +1945,11 @@ class traderMachell {
     }
     if (out.prev) {
       const thin = out.prev.liquid ? "" : "  [THIN - no signals]";
-      items.push(ray("pocL", rayX0, out.prev.poc, COLORS.poc, 3, 1));
+      lvl("pocL", out.prev.poc, COLORS.poc, 3, 1);
       lab("pocT", out.prev.poc, "PREV POC " + fmtL(out.prev.poc) + thin, COLORS.poc);
-      items.push(ray("vahL", rayX0, out.prev.vah, COLORS.va, 1, 3));
+      lvl("vahL", out.prev.vah, COLORS.va, 1, 3);
       lab("vahT", out.prev.vah, "VAH " + fmtL(out.prev.vah), COLORS.va, FONT_SM);
-      items.push(ray("valL", rayX0, out.prev.val, COLORS.va, 1, 3));
+      lvl("valL", out.prev.val, COLORS.va, 1, 3);
       lab("valT", out.prev.val, "VAL " + fmtL(out.prev.val), COLORS.va, FONT_SM);
     }
 
@@ -1953,20 +1979,18 @@ class traderMachell {
         if (out.prev && Math.abs(np.poc - out.prev.poc) < 1e-9) continue; // white ray owns it
         // keyed by session end time, not list position: entries shift as
         // rays get tested, and positional keys would swap identities
-        items.push(ray("nk" + np.endTms, oldAnchor(np.endTms, "npoc"),
-          np.poc, COLORS.naked, 1, 1));
+        lvl("nk" + np.endTms, np.poc, COLORS.naked, 1, 1);
         lab("nkT" + np.endTms, np.poc, "NPOC " + fmtL(np.poc), COLORS.nakedTxt, FONT_SM);
       }
     }
 
     if (out.htf) {
-      const hx = Math.max(0, rayX0 - 40);
-      items.push(ray("hpocL", hx, out.htf.poc, COLORS.htf, 3, 1));
+      lvl("hpocL", out.htf.poc, COLORS.htf, 3, 1);
       lab("hpocT", out.htf.poc,
         "HTF POC " + fmtL(out.htf.poc) + " (" + out.htf.sessions + "s)", COLORS.htf);
-      items.push(ray("hvahL", hx, out.htf.vah, COLORS.htf, 1, 4));
+      lvl("hvahL", out.htf.vah, COLORS.htf, 1, 4);
       lab("hvahT", out.htf.vah, "HTF VAH " + fmtL(out.htf.vah), COLORS.htf, FONT_SM);
-      items.push(ray("hvalL", hx, out.htf.val, COLORS.htf, 1, 4));
+      lvl("hvalL", out.htf.val, COLORS.htf, 1, 4);
       lab("hvalT", out.htf.val, "HTF VAL " + fmtL(out.htf.val), COLORS.htf, FONT_SM);
     }
 
@@ -2001,9 +2025,12 @@ class traderMachell {
       // NEVER pin the ACCUM level at x0 when its window predates loaded
       // history (live 2026-08-09 evening: gold ray fabricated at the
       // session start) -- an old level honestly extends from the left edge
-      const iaRay = ia !== undefined ? ia : oldAnchor(out.accum.start, "accum");
-      emits.accL = iaRay;
-      items.push(ray("accL", iaRay, out.accum.level, COLORS.accum, 2, 1));
+      emits.accL = "lvl";
+      lvl("accL", out.accum.level, COLORS.accum, 2, 1);
+      // the pre-history disclosure moves to the BOX path: the level line
+      // itself is now anchor-free
+      if (ia === undefined && this.tmsList.length &&
+          out.accum.start < this.tmsList[0]) offscreen = true;
       // provenance suffix: when the rotation window sits LEFT of the
       // current session start, its box can be far off-viewport while this
       // right-edge label is all the trader sees of ACCUM -- say so
@@ -2020,7 +2047,7 @@ class traderMachell {
 
     // ---- LEG cluster ----
     if (out.leg) {
-      items.push(ray("legL", rayX0, out.leg.level, COLORS.leg, 1, 1));
+      lvl("legL", out.leg.level, COLORS.leg, 1, 1);
       lab("legT", out.leg.level,
         "LEG " + fmtL(out.leg.level) +
         (out.leg.down ? "  SELL retest" : "  BUY retest") + "  [untested]",
@@ -2293,6 +2320,7 @@ class traderMachell {
       items.push(frameTxt("stat4", 70, 72,
         "tf=" + (cd4 ? cd4.underlyingType + "/" + cd4.elementSize : "none") +
         " barMin=" + this.barMin +
+        " bidx=" + (typeof d.index === "function" ? d.index() : "-") +
         " rst=" + ((this._resetTimes && this._resetTimes.length) || 0) +
         (this._staleCd ? " staleCd=" + this._staleCd : "") +
         " anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +

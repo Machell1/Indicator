@@ -613,7 +613,9 @@ if (aln.length) {
       check(items7.every(x => !x.key.startsWith(k)),
         'part7c: ' + k + ' drawn without a resolved anchor');
     const pocL = items7.find(x => x.key === 'pocL');
-    check(!!pocL && pocL.lines[0].a.x.v === 0, 'part7c: rays not anchored at chart edge');
+    check(!!pocL && pocL.lines[0].infiniteStart === true &&
+      pocL.lines[0].a.x.v === (n - 1) - 1 && pocL.lines[0].b.x.v === (n - 1) + 2,
+      'part7c: level line not in the anchor-free full-width form');
     const s3 = items7.find(x => x.key === 'stat3');
     check(s3 && s3.text.indexOf('[anchor unresolved') >= 0,
       'part7c: unresolved-anchor marker missing');
@@ -746,14 +748,13 @@ if (aln.length) {
   out9.nakedPocs = [{ poc: out9.prev.poc + 3, endTms: t0 - 7200e3 }];
   const items9 = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
   const accL9 = items9.find(x => x.key === 'accL');
-  check(!!accL9 && accL9.lines[0].a.x.v === 0,
-    'part9a: pre-history ACCUM ray not anchored at the chart edge: ' +
-    (accL9 ? accL9.lines[0].a.x.v : 'missing'));
+  check(!!accL9 && accL9.lines[0].infiniteStart === true,
+    'part9a: pre-history ACCUM level not anchor-free');
   check(items9.every(x => x.key !== 'accB' && !x.key.startsWith('apro')),
     'part9a: ACCUM box/histogram drawn with an unresolvable start');
   const nk9 = items9.find(x => x.key.startsWith('nk'));
-  check(!!nk9 && nk9.lines[0].a.x.v === 0,
-    'part9a: pre-history naked ray not anchored at the chart edge');
+  check(!!nk9 && nk9.lines[0].infiniteStart === true,
+    'part9a: pre-history naked level not anchor-free');
   const s39 = items9.find(x => x.key === 'stat3');
   check(s39 && s39.text.indexOf('[old anchors offscreen') >= 0,
     'part9a: offscreen marker missing');
@@ -1672,6 +1673,97 @@ if (aln.length) {
     it20b.some(x => x.key.startsWith('dpro')),
     'part20: Shapes families not restored with rowsPlot=0');
   console.log('part20 full row migration:  payloads, ramp, mirror, budget, fallback OK');
+}
+
+// -- part 21: community anchoring study items 1-3. barMin is derived
+// from observed bar spacing ALWAYS (chartDescription is a hint we never
+// depend on): no-description charts infer it, wrong hints correct, a
+// coarser feed is detected on unanimous evidence (closing the v9.1
+// residual gap), and quiet stretches on a fine chart can never fake a
+// coarser one. Every LEVEL-class layer is an anchor-free full-width
+// line whose only coordinates are the live edge. --
+{
+  const agg21 = (src, k) => {
+    const m = new Map();
+    for (const b of src) {
+      const slot = Math.floor(b.tMs / (k * 60e3)) * k * 60e3;
+      let e = m.get(slot);
+      if (!e) { e = { tMs: slot, o: b.o, h: b.h, l: b.l, c: b.c, vol: 0, offv: 0, bidv: 0 }; m.set(slot, e); }
+      if (b.h > e.h) e.h = b.h;
+      if (b.l < e.l) e.l = b.l;
+      e.c = b.c; e.vol += b.vol; e.offv += b.offv; e.bidv += b.bidv;
+    }
+    return [...m.values()].sort((a, b) => a.tMs - b.tMs);
+  };
+  const feed = (inst, arr) => {
+    let r = null;
+    const ents = arr.map((b, j, a2) => entity(b, j === a2.length - 1, true));
+    for (let j = 0; j < ents.length; j++)
+      r = inst.map(ents[j], j, makeHistory(ents.slice(0, j + 1)));
+    return r;
+  };
+  // 21a: NO chartDescription at all, 5M bars -> barMin observed as 5
+  const instA = new Calc();
+  instA.props = { htfSessions: 20 };
+  instA.contractInfo = { tickSize: 0.1 };
+  instA.chartDescription = undefined;
+  instA.init();
+  feed(instA, agg21(bars.slice(0, 1500), 5));
+  check(instA.barMin === 5,
+    'part21a: barMin not observed without a description: ' + instA.barMin);
+  // 21b: THE v9.1 RESIDUAL GAP -- a stale episode (5M -> 1M with the
+  // description stuck at 5) followed by a coarse RETURN to 5M with the
+  // description STILL stuck. Detector A is suppressed by staleCd; the
+  // description disagrees with the observed barMin, so unanimous-coarser
+  // evidence is allowed to decide -- and must.
+  const instB = new Calc();
+  instB.props = { htfSessions: 20 };
+  instB.contractInfo = { tickSize: 0.1 };
+  instB.chartDescription = { underlyingType: 'MinuteBar', elementSize: 5 };
+  instB.init();
+  feed(instB, agg21(bars.slice(0, 1500), 5));      // healthy 5M phase
+  feed(instB, bars.slice(1500, 1650));             // 1M re-feed, cd stuck at 5
+  check(instB.barMin === 1, 'part21b: stale-episode downswitch failed');
+  check(instB._staleCd === 5, 'part21b: staleCd not recorded');
+  feed(instB, agg21(bars.slice(1650, 3500), 5));   // coarse RETURN, cd still 5
+  check(instB.barMin === 5,
+    'part21b: the v9.1 residual gap not closed: barMin=' + instB.barMin);
+  check(!instB._resetLoop, 'part21b: escalated instead of inferring');
+  // 21c: quiet stretches cannot fake coarser -- 1M bars with omitted
+  // minutes (varied 2-4 min gaps) must keep barMin=1, zero resets
+  const instC = new Calc();
+  instC.props = { htfSessions: 20 };
+  instC.contractInfo = { tickSize: 0.1 };
+  instC.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  instC.init();
+  const quiet = [];
+  let t21 = bars[0].tMs;
+  const gaps = [1, 2, 1, 3, 1, 4, 2, 1];
+  for (let j = 0; j < 400; j++) {
+    t21 += gaps[j % gaps.length] * 60e3;
+    quiet.push(Object.assign({}, bars[j], { tMs: t21 }));
+  }
+  feed(instC, quiet);
+  check(instC.barMin === 1, 'part21c: quiet stretch faked a coarser feed');
+  check(!(instC._resetTimes && instC._resetTimes.length),
+    'part21c: spurious resets on a quiet fine chart');
+  // 21d: LEVEL-class lines are anchor-free full-width for the whole
+  // family, and the diag line carries the passive bidx probe
+  const R21 = runModel('A', 400, { htfSessions: 20, diag: 1 });
+  const it21 = R21.lastResult.graphics.items;
+  const lvlKeys = it21.filter(x => x.tag === 'LineSegments' &&
+    x.lines.length === 1 && x.lines[0].infiniteStart === true)
+    .map(x => x.key);
+  for (const k21 of ['pocL', 'vahL', 'valL', 'dpocL', 'dvahL', 'dvalL'])
+    check(lvlKeys.indexOf(k21) >= 0, 'part21d: not anchor-free: ' + k21);
+  for (const it of it21)
+    if (lvlKeys.indexOf(it.key) >= 0) {
+      check(it.lines[0].a.x.v === (n - 1) - 1 && it.lines[0].b.x.v === (n - 1) + 2,
+        'part21d: level endpoints not at the live edge: ' + it.key);
+    }
+  const s421 = it21.find(x => x.key === 'stat4');
+  check(s421 && / bidx=/.test(s421.text), 'part21d: bidx probe missing from diag');
+  console.log('part21 anchor-free levels:  observed barMin (a-c), full-width family, bidx OK');
 }
 
 const kindsOf = c => {
