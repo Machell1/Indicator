@@ -893,6 +893,13 @@ const FONT_XS = { fontSize: 10, fontWeight: "normal" };
 const MP_RAMP_STEPS = 10;
 const MP_SPAN_FILL = 0.85;   // max row width as a fraction of the session's bar span
 const MP_PROMINENT = 0.8;    // POC-row bar coverage for a "prominent median"
+// WIDTH POLICY (docs/VISUAL_V9_3_ONE_MINUTE.md, a stated decision):
+// FINALIZED session profiles fill MP_SPAN_FILL of their day at every
+// timeframe (the MT5 look). The DEVELOPING/current-session profile and
+// the v4 prev-projection stay capped at VIS.prevMaxBars (~150 one-minute
+// bars) ON PURPOSE: rows render opaque (fill alpha is broken on this
+// platform), and a day-wide developing profile would bury the session's
+// candles. Revisit when the vaFill plotter test proves translucency.
 function rampColor(t) {
   const T = Math.max(0, Math.min(1, t));
   const r = Math.round(255 * T), b = 255 - r;
@@ -2039,8 +2046,11 @@ class traderMachell {
     // At coarse timeframes the viewport shows weeks, so labels many
     // points apart still overlap on screen: widen the cluster pitch with
     // an HTF-span term (section 7's ACCUM/NPOC collision at 30M).
+    // 0.12 tuned against the section-8 30M frame: the ACCUM label sat in
+    // a cluster adjacent to the dPOC/PREV POC fan and their fans touched;
+    // the wider pitch merges that neighborhood into ONE fan
     const coarseEps = (this.barMin >= 15 && out.htf)
-      ? (out.htf.vah - out.htf.val) * 0.08 : 0;
+      ? (out.htf.vah - out.htf.val) * 0.12 : 0;
     items.push(...layoutLabels(labels, lx, out.atr || 0, false, coarseEps));
 
     // ---- emitted-geometry invariant (field report section 6) ----
@@ -2141,7 +2151,13 @@ class traderMachell {
       items.push(frameTxt("stat2", 70, 36,
         "PREV  POC " + fmt(out.prev.poc) + "   VAH " + fmt(out.prev.vah) +
         "   VAL " + fmt(out.prev.val) +
-        (out.htf ? "      HTF POC " + fmt(out.htf.poc) : "      HTF: needs more history"),
+        (out.htf ? "      HTF POC " + fmt(out.htf.poc)
+          // measured decision (docs/VISUAL_V9_3_ONE_MINUTE.md): a composite
+          // from the ~2 sessions loadable at 1M misstates the 20-session
+          // levels by a median ~90-150 pts -- never synthesize it; say
+          // exactly what is missing and where to read it instead
+          : "      HTF: n/a - " + this.core.sessions.length +
+            "/5 sessions loadable here (read HTF on 30M)"),
         COLORS.dim, FONT_SM));
     const ctx = [];
     if (out.htf) {

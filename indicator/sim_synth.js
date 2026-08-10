@@ -1486,11 +1486,39 @@ if (aln.length) {
       val: out30.prev.poc - 150, sessions: 5 };
   const it30c = inst30.buildItems(ents30[ents30.length - 1], ents30.length - 1, null);
   const legT = it30c.find(x => x.key === 'legT');
-  const spanHtf = (out30.htf.vah - out30.htf.val) * 0.08;
+  const spanHtf = (out30.htf.vah - out30.htf.val) * 0.12;
   check(!!legT && spanHtf > 17, 'part17c: coarse-pitch fixture invalid');
   if (legT && spanHtf > 17)
     check(legT.point.y.unit === 'op', 'part17c: coarse labels not fanned at 30M');
   console.log('part17 gauge widths:        slab class dead, telemetry, oversize, labels OK');
+}
+
+// -- part 18: HTF-on-1M explicit limitation (ONE_MINUTE_ASSESSMENT sec 1,
+// measured decision). With fewer than 5 sessions loadable, the banner
+// must state the ceiling and the remedy -- never a warm-up message, and
+// never a synthesized composite (median 87-146pt drift at k=2 on the
+// real dataset). --
+{
+  const inst = new Calc();
+  inst.props = { htfSessions: 20 };
+  inst.contractInfo = { tickSize: 0.1 };
+  inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  inst.init();
+  // two sessions + a live tail -- the 1M 3000-bar reality
+  const src18 = bars.slice(0, 2 * 1380 + 300);
+  const ents18 = src18.map((b, j, arr) => entity(b, j === arr.length - 1, true));
+  let res18 = null;
+  for (let j = 0; j < ents18.length; j++)
+    res18 = inst.map(ents18[j], j, makeHistory(ents18.slice(0, j + 1)));
+  const it18 = res18.graphics.items;
+  check(inst.core.sessions.length === 2, 'part18: fixture session count wrong');
+  check(!inst.core.htf, 'part18: composite unexpectedly built');
+  const s218 = it18.find(x => x.key === 'stat2');
+  check(!!s218 && s218.text.indexOf('HTF: n/a - 2/5 sessions loadable here (read HTF on 30M)') >= 0,
+    'part18: explicit HTF limitation missing: ' + (s218 ? s218.text : '-'));
+  check(it18.every(x => !x.key.startsWith('hpro') && x.key !== 'hpocL'),
+    'part18: HTF layers drawn without a composite');
+  console.log('part18 HTF-on-1M banner:    explicit ceiling + remedy OK');
 }
 
 const kindsOf = c => {
