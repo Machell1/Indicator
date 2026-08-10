@@ -211,3 +211,71 @@ on every profile-derived label at 5M and vanished at 1M, which means
    description staleness is one-shot or persistent (the one residual gap
    Cursor flagged: returning to exactly the stale timeframe is
    unprovable from spacing alone).
+
+---
+
+# §7 — 30M FIRST CONTACT (2026-08-10 23:27 CDT, trader-initiated)
+
+The trader switched to 30M himself. **The MP clone works at 30M** — this
+is the closest the project has come to the reference look. One layer is
+badly broken, and label de-collision needs work at this density.
+
+## WORKING at 30M (verified visually, no reset issues)
+
+- Multiple session profiles, each Blue->Red graded, each sitting ON its
+  own session's candles across ~4 weeks of history.
+- White VA brackets + key values per profile, correct and readable:
+  `VAH 4131.6* / POC 4106.6* / VAL 4075.3*`,
+  `VAH 4139.9* / POC 4117.3* / VAL 4093.6*`,
+  `VAH 4325.7* / POC 4301.2* / VAL 4219.8*`,
+  `VAH 4425.1* / POC 4402.5* / VAL 4348.9*`.
+- `*` on every profile-derived label + `CAUTION: 30-min bars - grades
+  measured on 1-min; * marks 30-m...` -- disclosure correct at 30M.
+- Status `armed - outside the 09:00-11:00 NY window`; HTF POC 4109.4,
+  `HTF VAH 4303.2*`, `HTF VAL 4055.2*`, `NPOC 4117.3*`; `[t-du]` active.
+- No reset loop, no reloading residue, no F5 needed. v9.1 holds at 30M.
+
+## BROKEN 1 — a giant opaque slab swallows the rally (HIGH)
+
+A dark olive/gold block spans roughly **08/05 -> 08/09 (~4 days, ~190
+30M bars)** at the **full price height (~4050-4430)**, with row
+striations, sitting exactly over the strongest rally on the chart and
+hiding that price action completely. Color reads as `htfGhost #4E3D12`
+or `accHist #5C4A16`.
+
+Why this shouldn't be constructible: at 30M `wHtf = max(20, round(120/30))
+= 20` bars and `wAcc = max(20, round(90/30)) = 20` bars, i.e. ~10 hours,
+and the ACCUM row cap is `min(this.wAcc, max(10, ib - ia))` which is also
+20. **Nothing in the width math should exceed ~20 bars, yet the rendered
+block is ~190 bars wide -- roughly 10x.** Note the ACCUM label on the
+same frame reads `3.5d` (its window is 3.5 days) and the slab is ~4 days
+wide, which suggests some path is drawing at WINDOW length rather than
+the row-width cap once barMin is large.
+
+**Ask:** print `emit hpro@<x>w<width>` and `emit apro@<x>w<width>` (and
+the ACCUM box span) in diag exactly like `sp@`, so a single 30M frame
+identifies which family is oversized and by how much. Then cap in the
+same place the emitted-geometry guard already lives -- a filled rect
+wider than N bars OR taller than the visible price range is never
+legitimate and should be suppressed + named, the same defense-in-depth
+that caught earlier classes.
+
+## BROKEN 2 — label collisions at multi-session density (MEDIUM)
+
+Around 4100-4140 several labels overprint into unreadable clusters, e.g.
+`POC 4130.1*` over `VAH 4130.9*`, and `ACCUM 4100.4* (30s)` overlapping
+`NPOC 4117.3*`. The de-collision pass handles the right-edge column but
+not per-profile key values from ADJACENT sessions whose price ranges
+overlap. At 30M with ~6 profiles visible this is the normal case, not an
+edge case. Consider: de-collide across ALL text items globally (not per
+family), and/or drop per-profile key values when profiles are closer
+together than the label pitch, keeping only the right-edge column.
+
+## Process note
+
+Diag numbers were NOT captured for this frame -- a mis-aimed click landed
+on the chart canvas and opened Tradovate's order-entry bubble (no order
+placed; position stayed 0, equity unchanged; cleared by reload). Chart
+canvas clicks are now off-limits during testing; use the Elements panel
+route only, and verify the settings dialog is actually open (screenshot)
+before clicking any coordinate inside it.
