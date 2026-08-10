@@ -292,3 +292,35 @@ suggests the layout origin is near the SUNDAY session start since minute
 transform with the same labeled lines before/after, per your discipline.
 Note the mirror/anchors stay bar-index internally (all engine + guard
 logic is index-true); ONLY the final du() emission transforms.
+
+---
+
+## 11. v8 LIVE VERIFICATION (deployed 22:02 CDT) -- TRANSFORM CONFIRMED. SAGA CLOSED.
+
+Probe frame with [t-du] auto-active on the live chart:
+
+- The white LIVE CLOSE reference stands ON the live candle; calib probes
+  distribute correctly through the bar region and the future grid.
+- **The developing session profile renders ON its own candles at
+  tonight's actual traded prices -- the first correctly-positioned
+  histogram on a live chart in this project's history.**
+- dev levels hug price; PREV POC 4407.9 ray correct; VAL 4352.5 below;
+  the ACCUM ray carries its provenance suffix ("4.1d" -- window 4.1 days
+  left). NOTHING renders displaced into the future grid.
+- No originShift needed on this reading (du=i reference on the candle).
+
+Sections 1-10 stand as the complete record: one undocumented platform
+behavior (du = minute-slots on the laid-out time axis when live),
+discovered, instrumented, measured with a labeled probe, and corrected
+with a boundary transform -- engine untouched throughout, 205/205 on all
+eight deployments of 2026-08-09/10.
+
+Remaining watch items for the next sessions (non-blocking):
+1. Monday RTH: [t-du] across the maintenance halt (the interpolation's
+   first live halt crossing) and the 09:00-11:00 NY window arming.
+2. Next weekend pre-open: banner drops back to [du], Saturday look
+   unchanged (v8 doc section 5 sanity check).
+3. MP clone polish items once positioning is confirmed stable in RTH:
+   full-history session boxes with deeper bars-to-load if the platform
+   timeout allows, and the vaFill translucency live test (still never
+   run -- the anchor saga preempted it).
