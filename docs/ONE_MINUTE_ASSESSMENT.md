@@ -84,3 +84,64 @@ then decide whether to move row rendering onto the plotter path.
 3. Width-consistency decision (choose and document).
 4. Carried over: top-right label-stack cross-cluster sweep;
    `hpro@/apro@/accB@` telemetry capture at a coarse timeframe.
+
+---
+
+# section 9 — vaFill LIVE TEST: THE PLOTTER HONOURS OPACITY (2026-08-10 11:15-11:21 CDT)
+
+Ran at the trader's go-ahead, v9.3 deployed, 1M chart, live RTH.
+
+## RESULT: THE ROUTE WORKS. Real alpha compositing confirmed.
+
+Procedure and readings:
+1. `vaFill=1`, opacity at the 18 default -> a band is present but too
+   subtle to call with confidence from a compressed screenshot. Refused
+   to declare either way on that frame.
+2. Raised `vaFillOpacity` to **80** to turn a marginal signal into a
+   decisive one. Result unmistakable: a solid teal region spanning the
+   prior session value area (VAL 4352.5 -> VAH 4432.4) across the whole
+   session, **with every candle still visible through it** — wicks,
+   bodies and the 09:00 rally all readable inside the band.
+3. Restored to a usable **opacity 14**; shading present, candles clean.
+   Chart left in this state.
+
+**Conclusion: `canvas.drawLine` with a first-class `opacity` style does
+real alpha compositing on this platform.** This is the definitive
+counter-case to the graphics-items fill-alpha fact (live Bug A, v3): the
+two pipelines genuinely differ, exactly as the v6 community research
+predicted. Registration, draw path, opacity, colour and VA span are all
+now live-verified — the layer built in v6 and never run until today is
+fully proven.
+
+## What this unlocks (the next PR)
+
+Per Cursor's own branch condition, this is the "route works" outcome:
+- Move the profile ROWS onto the plotter path so they stop occluding the
+  candles they sit on (1M assessment item 3, root-caused rather than
+  worked around).
+- With rows no longer opaque, the ~150-bar developing-profile cap can be
+  revisited: day-wide developing profiles become viable, which closes
+  the cross-timeframe width inconsistency (item 2) in the same change.
+- Both items were explicitly blocked on this reading. They are now
+  unblocked.
+
+## Calibration notes for the implementation
+
+- 18 (the shipped default) reads too faint against this dark theme at
+  1M; **14 is comfortable for the VA band**, and the useful range for
+  rows will need its own tuning since rows overlap each other.
+- 80 is far too strong for production but is an excellent diagnostic
+  setting — recommend keeping it in the doc as the "is the plotter
+  drawing at all?" probe, since the 18-default frame was genuinely
+  ambiguous.
+- The band correctly shades each bar with ITS session's prior VA; on a
+  1M chart where the whole viewport sits inside the prior VA, that means
+  the entire visible area tints. Worth stating in the doc so it is not
+  mistaken for a bug.
+
+## Account state
+
+Position 0, equity 98,919.41 unchanged. All dialog interaction went
+through the Elements panel with a screenshot verification before every
+click inside the dialog (the process rule added after the section 7
+order-bubble incident) — no chart-canvas clicks.
