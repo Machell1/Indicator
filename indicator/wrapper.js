@@ -497,6 +497,7 @@ class traderMachell {
     return {
       duMode: pBool(p.scaledWidths, true),   // du widths live-proven 2026-08-09
       dev: pBool(p.devProfile, true),        // developing session profile (SVP)
+      rowsPlot: pBool(p.rowsPlot, true),     // translucent plotter rows (v10)
       nodes: pBool(p.nodes, true),           // HVN/LVN ticks on the prior profile
       history: pBool(p.showHistory, false),
       alignTest: pBool(p.alignTest, false),
@@ -1105,11 +1106,31 @@ class traderMachell {
     // stays in its own box (sessionProfiles below).
     // devProfile=0: v4 layout -- prior-session histogram projected here.
     const dev = O.dev ? this._devProfile(out) : null;
+    this._plotRows = null;
     if (dev) {
-      if (histOk)
-        // dev POC row wears the teal-green dev color, NOT the graded gold:
-        // gold is v4's visual signature for the graded PRIOR POC, and the
-        // developing dPOC carries no tested grade (evidence-honesty rule)
+      if (O.rowsPlot && x0Ok && duMode) {
+        // v10: the developing profile moves to the TRANSLUCENT plotter
+        // path (live-verified alpha, 2026-08-10) and fills the elapsed
+        // day like the finalized sessions -- the 150-bar opaque cap and
+        // the cross-timeframe width inconsistency retire together.
+        // Anchor/width are CHART-INDEX space: the plotter uses the
+        // platform's own per-bar plot coordinates.
+        // (dev POC row keeps the teal-green dev color, never graded gold
+        // -- evidence-honesty rule)
+        this._plotRows = {
+          anchor: x0,
+          w: Math.max(8, Math.min(
+            Math.round(this.core.dayBars.length * MP_SPAN_FILL), i - x0)),
+          rows: dev.rows.map(r => ({ price: r.price, h: r.h * VIS.rowFill,
+            frac: r.frac,
+            color: r.isPoc ? COLORS.dev : (r.inVA ? COLORS.profileVA : COLORS.profile) })),
+        };
+      } else if (histOk)
+        // fallback path (rowsPlot=0): the v9.3 opaque Shapes rows with
+        // the occlusion-limiting 150-bar cap
+        // (dev POC row wears the teal-green dev color, NOT the graded
+        // gold: gold is v4's visual signature for the graded PRIOR POC,
+        // and the developing dPOC carries no tested grade)
         items.push(...histogram("dpro", dev.rows, x0, 1,
           COLORS.profile, COLORS.profileVA, COLORS.dev,
           duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
@@ -1545,23 +1566,70 @@ function vaFillPlotter(canvas, instance, history) {
   try {
     if (!plt) return;   // ./tools/plotting unavailable on this build
     const props = instance.props || {};
-    if (!pBool(props.vaFill, false)) return;
-    const color = (typeof props.vaFillColor === "string" && props.vaFillColor)
-      ? props.vaFillColor : "#3E7E93";
-    let opac = Number(props.vaFillOpacity);
-    if (!Number.isFinite(opac)) opac = 18;
-    opac = Math.max(0, Math.min(100, opac)) / 100;
-    if (opac <= 0) return;
-    // cap the walk: one drawLine per bar over a deep-loaded 110k-bar
-    // history would hammer every repaint. ~20k 1-min bars = 2+ weeks of
-    // shading, far beyond what any zoom level shows at once.
-    const first = Math.max(0, history.data.length - 20000);
-    for (let i = first; i < history.data.length; i++) {
-      const item = history.get(i);
-      if (!item || item.vaLo === undefined || item.vaHi === undefined) continue;
-      const x = plt.x.get(item);
-      canvas.drawLine(plt.offset(x, item.vaLo), plt.offset(x, item.vaHi),
-        { color, relativeWidth: 1, opacity: opac });
+    // ---- VA band (live-verified 2026-08-10: real alpha compositing;
+    // production opacity 14, diagnostic probe 80) ----
+    if (pBool(props.vaFill, false)) {
+      const color = (typeof props.vaFillColor === "string" && props.vaFillColor)
+        ? props.vaFillColor : "#3E7E93";
+      let opac = Number(props.vaFillOpacity);
+      if (!Number.isFinite(opac)) opac = 14;
+      opac = Math.max(0, Math.min(100, opac)) / 100;
+      if (opac > 0) {
+        // cap the walk: one drawLine per bar over a deep-loaded 110k-bar
+        // history would hammer every repaint
+        const first = Math.max(0, history.data.length - 20000);
+        for (let i = first; i < history.data.length; i++) {
+          const item = history.get(i);
+          if (!item || item.vaLo === undefined || item.vaHi === undefined) continue;
+          const x = plt.x.get(item);
+          canvas.drawLine(plt.offset(x, item.vaLo), plt.offset(x, item.vaHi),
+            { color, relativeWidth: 1, opacity: opac });
+        }
+      }
+    }
+    // ---- translucent profile ROWS (v10: the current-session profile
+    // moves off the opaque Shapes path so it stops hiding the candles it
+    // sits on). buildItems publishes the frame's row set + anchor/width
+    // in CHART-INDEX space -- the plotter's x comes from the platform's
+    // own per-bar plot coordinates, so the minute-slot question never
+    // arises on this path. Drawn as one bar-wide vertical strip per
+    // column per contiguous same-color row run (the community zone
+    // technique), with a stroke budget. ----
+    const PR = instance._plotRows;
+    if (PR && pBool(props.rowsPlot, true)) {
+      let rOp = Number(props.rowOpacity);
+      if (!Number.isFinite(rOp)) rOp = 20;
+      rOp = Math.max(0, Math.min(100, rOp)) / 100;
+      if (rOp <= 0) return;
+      let budget = 12000;
+      const jEnd = Math.min(PR.anchor + PR.w, history.data.length - 1);
+      for (let j = PR.anchor; j <= jEnd && budget > 0; j++) {
+        const item = history.get(j);
+        if (!item) continue;
+        const x = plt.x.get(item);
+        const d = j - PR.anchor;
+        // merge consecutive covered rows of the same color into strips
+        let runLo = null, runHi = null, runColor = null;
+        for (let r = 0; r <= PR.rows.length; r++) {
+          const row = PR.rows[r];
+          const covered = !!row && (row.frac * PR.w) > d && row.h > 0;
+          const col = covered ? row.color : null;
+          if (covered && col === runColor) {
+            runHi = row.price + (row.h * 0.5);
+            continue;
+          }
+          if (runColor !== null && budget > 0) {
+            canvas.drawLine(plt.offset(x, runLo), plt.offset(x, runHi),
+              { color: runColor, relativeWidth: 1, opacity: rOp });
+            budget--;
+          }
+          runColor = col;
+          if (covered) {
+            runLo = row.price - (row.h * 0.5);
+            runHi = row.price + (row.h * 0.5);
+          }
+        }
+      }
     }
   } catch (e) { /* optional layer: swallow, never break the chart */ }
 }
@@ -1589,7 +1657,9 @@ module.exports = {
     vaFillColor: (predef.paramSpecs && typeof predef.paramSpecs.color === "function")
       ? predef.paramSpecs.color("#3E7E93")
       : predef.paramSpecs.number(0, 1, 0),
-    vaFillOpacity: predef.paramSpecs.number(18, 1, 0),// fill opacity, 0..100
+    vaFillOpacity: predef.paramSpecs.number(14, 1, 0),// band opacity 0..100 (14 = trader-calibrated live; 80 = "is it drawing at all?" probe)
+    rowsPlot: predef.paramSpecs.number(1, 1, 0),      // 1 = developing rows translucent via plotter, day-wide (v10); 0 = v9.3 opaque 150-bar rows
+    rowOpacity: predef.paramSpecs.number(20, 1, 0),   // row opacity 0..100 (first guess -- calibrate live like the band)
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner

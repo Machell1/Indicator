@@ -98,7 +98,10 @@ const Calc = mod.calculator;
 
 function runModel(model, liveTail, props) {
   const inst = new Calc();
-  inst.props = props || { htfSessions: 20, alignTest: 1 };
+  // shared default runs stay on the v9.3 opaque-rows path (rowsPlot: '0')
+  // so parts 1/2/8's Shapes invariants keep guarding it; the v10 plotter
+  // default is exercised by part 19 with its own props
+  inst.props = props || { htfSessions: 20, alignTest: 1, rowsPlot: '0' };
   inst.contractInfo = { contract: 'GCQ6', product: 'GC', tickSize: 0.1 };
   inst.chartDescription = {
     underlyingType: 'MinuteBar', elementSize: 1,
@@ -1519,6 +1522,70 @@ if (aln.length) {
   check(it18.every(x => !x.key.startsWith('hpro') && x.key !== 'hpocL'),
     'part18: HTF layers drawn without a composite');
   console.log('part18 HTF-on-1M banner:    explicit ceiling + remedy OK');
+}
+
+// -- part 19: translucent plotter rows (v10, unblocked by the live vaFill
+// verification). rowsPlot=1 (default): the developing profile leaves the
+// opaque Shapes path, publishes a day-wide row set in chart-index space,
+// and the plotter draws bar-wide vertical strips with real opacity,
+// merging same-color runs per column. rowsPlot=0 restores v9.3 exactly. --
+{
+  const R19 = runModel('A', 400, { htfSessions: 20 });  // rowsPlot defaults ON
+  const inst = R19.inst;
+  const iLast = n - 1;
+  const it19 = R19.lastResult.graphics.items;
+  // default: Shapes dev rows gone, payload published
+  check(it19.every(x => !(x.tag === 'Shapes' && x.key.startsWith('dpro'))),
+    'part19: opaque dev rows still drawn with rowsPlot on');
+  const PR19 = inst._plotRows;
+  check(!!PR19, 'part19: plotter row payload missing');
+  if (PR19) {
+    const x0gt = inst._tailRef(inst.lastOut.dayStartTms, iLast);
+    check(PR19.anchor === x0gt, 'part19: payload anchor not chart-index space');
+    const wWant = Math.max(8, Math.min(
+      Math.round(inst.core.dayBars.length * 0.85), iLast - x0gt));
+    check(PR19.w === wWant, `part19: not day-wide: w=${PR19.w} want=${wWant}`);
+    check(PR19.rows.length > 0 && PR19.rows.every(r =>
+      typeof r.color === 'string' && r.frac > 0 && r.h > 0),
+      'part19: row payload malformed');
+    check(PR19.rows.every(r => r.color !== '#FFC42C'),
+      'part19: graded gold leaked onto the developing profile');
+  }
+  // drive the plotter with a stub canvas
+  const custom19 = (mod.plotter || []).find(pl => pl && pl.type === 'custom').fn;
+  const hist19 = { data: { length: iLast + 1 }, get: j => ({ __x: j }) };
+  const draws19 = [];
+  const canvas19 = { drawLine: (a, b, s) => draws19.push({ a, b, s }) };
+  custom19(canvas19, { props: { rowsPlot: '1', rowOpacity: '35' },
+    _plotRows: PR19 }, hist19);
+  check(draws19.length > 0, 'part19: plotter drew no rows');
+  const perCol = {};
+  for (const dr of draws19) {
+    check(dr.a.x === dr.b.x, 'part19: non-vertical row strip');
+    check(dr.s.opacity === 0.35, 'part19: rowOpacity not honoured: ' + dr.s.opacity);
+    check(PR19.rows.some(r => r.color === dr.s.color),
+      'part19: stroke color not from the published set');
+    check(dr.a.x >= PR19.anchor && dr.a.x <= PR19.anchor + PR19.w,
+      'part19: stroke outside the profile span');
+    perCol[dr.a.x] = (perCol[dr.a.x] || 0) + 1;
+  }
+  const maxPerCol = Math.max.apply(null, Object.values(perCol));
+  check(maxPerCol <= 8,
+    'part19: run merging ineffective (' + maxPerCol + ' strokes in one column)');
+  check(Object.keys(perCol).length > PR19.w * 0.5,
+    'part19: column coverage too sparse');
+  // rowsPlot off => nothing drawn by the plotter, payload still present
+  const draws19b = [];
+  custom19({ drawLine: (a, b, s) => draws19b.push(1) },
+    { props: { rowsPlot: '0' }, _plotRows: PR19 }, hist19);
+  check(draws19b.length === 0, 'part19: rows drawn despite rowsPlot=0');
+  // rowsPlot='0' at the frame level restores the v9.3 Shapes path
+  inst.props = Object.assign({}, inst.props, { rowsPlot: '0' });
+  const it19b = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  check(it19b.some(x => x.tag === 'Shapes' && x.key.startsWith('dpro')),
+    'part19: v9.3 fallback rows missing with rowsPlot=0');
+  check(inst._plotRows === null, 'part19: payload not cleared in fallback mode');
+  console.log('part19 plotter rows:        day-wide payload, strips, merge, fallback OK');
 }
 
 const kindsOf = c => {
