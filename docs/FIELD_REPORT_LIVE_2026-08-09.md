@@ -182,3 +182,44 @@ implies ray-hidden), document it in VISUAL_V6_4_EMITTED_GEOMETRY.md.
 
 Session tally: 4 live deployments (v6.1 hot patch, v6.2, v6.3, v6.4),
 205/205 on every one, position 0 and equity unchanged throughout.
+
+---
+
+## 8. v7 live verification (deployed 20:30 CDT): the MP look renders; one mis-boxed session profile
+
+**The clone look is CONFIRMED live** -- Blue->Red gradient reads exactly
+like the reference (blue early rows top, red late rows bottom), white
+median row, brackets, gold ACCUM rows interleaved. The construction-time
+emit telemetry prints plain numbers: `anchor=ok@2789 i=3000 base=0
+mirror=3000 gap=0 desync=0 acc=2879..1005 emit accB@120 accL@120 sp@29`.
+
+**THE BUG:** a fully-styled session profile whose content is THURSDAY's
+session -- trader-confirmed by its levels: white median at 4324.9, rows
+bracketing VAH 4344.1 / VAL 4303.6, exactly the Thursday values -- is
+drawn in a box spanning roughly [Friday close .. right edge of the
+future grid], i.e. across TONIGHT's session region. The trader confirms
+tonight NEVER traded 4305-4365 (price was 4370+ all evening, at 4375
+falling when observed). So: right content, wrong box.
+
+**Second finding:** that box extends well past the live bar into the
+future grid and `[future-grid item]` did NOT fire -- the emitted-geometry
+guard does not cover the new MP elements (day-spanning boxes/medians/
+brackets), contrary to spec section 4. Close that gap regardless of the
+box fix.
+
+**Telemetry gap that hid the culprit:** `sp@29` prints only the FIRST
+session profile's position. The mis-boxed session (Thursday's) is one of
+the later entries. Print ALL session anchors as a comma list
+(`sp@29,1430,2810,...`) so the culprit self-identifies next reading.
+
+**Geometry hints for the audit:** Thursday's session START (Wed 17:00 NY)
+is PRE-HISTORY at bars-to-load 3000 (buffer starts ~Thu afternoon) -- its
+start does not resolve. The v6.3 rule for that case is edge-anchor (rays)
+or hide (boxes/histograms). The new MP day-spanning box code appears to
+take a different path: box lands at ~[Fri-close .. +day-span]. Audit what
+the MP box does when idx(session.start) is undefined -- suspect a
+fallback to the session END (Thu 16:00 CDT resolves fine) PLUS the day
+span drawn FORWARD from it, which lands the box exactly where observed
+(Thu-end + 1 day = Fri-end, + drift across the weekend-gap axis). The
+v6.3 rule should apply: unresolvable box start = do not draw the box,
+banner the offscreen marker.
