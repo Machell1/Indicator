@@ -1618,6 +1618,13 @@ class traderMachell {
     const mism = new Set();
     let offscreen = false;
     const emits = { accB: "-", accL: "-", sp: "-", hpro: "-", apro: "-" };
+    // v10.1: ALL profile row fills ride the translucent plotter path when
+    // rowsPlot is on (live-verified alpha + repaint cost, 2026-08-10).
+    // Publishers append with a priority (0=dev, 1=sessions, 2=ACCUM,
+    // 3=HTF mirror); the list is priority-sorted before the frame ends so
+    // the plotter's shared stroke budget degrades least-important last.
+    this._plotProfiles = [];
+    const rowsToPlotter = O.rowsPlot && duMode;
     const futureKeys = new Set();   // filled by guards below + the final scan
     const idx = (t, layer) => {
       const r = this._idxOf(t, endIdx, tcache);
@@ -1697,8 +1704,14 @@ class traderMachell {
       // rows scale proportionally to the cap)
       const wH = Math.min(this.wHtf, x0);
       emits.hpro = x0 + "w" + wH;
-      items.push(...histogram("hpro", out.htfRows, x0, -1,
-        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow, wH, true));
+      if (rowsToPlotter) {
+        this._plotProfiles.push({ pri: 3, anchor: x0, w: wH, dir: -1,
+          rows: out.htfRows.map(r => ({ price: r.price, h: (r.h || 0) * VIS.rowFill,
+            frac: r.frac,
+            color: r.isPoc ? COLORS.htfPocRow : COLORS.htfGhost })) });
+      } else
+        items.push(...histogram("hpro", out.htfRows, x0, -1,
+          COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow, wH, true));
     }
 
     // ---- per-session profiles: the MP_55396 look (docs/MP55396_CLONE_
@@ -1752,23 +1765,33 @@ class traderMachell {
         // them would stretch past the rows across halts/weekends.
         const sx = DU_T(six);
         const sRight = sx + wS;
-        // rows, batched into one Shapes item per ramp bucket
-        const buckets = [];
-        for (const r of mp.rows) {
-          if (!(r.frac > 0) || !(r.h > 0)) continue;
-          const h = r.h * VIS.rowFill;
-          const pLo = r.price - h / 2, pHi = r.price + h / 2;
-          const bkt = rampBucket(r.t);
-          if (!buckets[bkt]) buckets[bkt] = [];
-          buckets[bkt].push(duMode
-            ? slotRect(sx, Math.max(VIS.minRowBars, r.frac * wS), pLo, pHi)
-            : pxrect(six, Math.max(VIS.minRowPx, Math.round(r.frac * wS)), pLo, pHi));
+        if (rowsToPlotter) {
+          // v10.1: session rows ride the plotter path, keeping their
+          // Blue->Red ramp per row (bucketed colors, same visual identity
+          // as the Shapes path)
+          this._plotProfiles.push({ pri: 1, anchor: six, w: wS,
+            rows: mp.rows.filter(r => r.frac > 0 && r.h > 0)
+              .map(r => ({ price: r.price, h: r.h * VIS.rowFill, frac: r.frac,
+                color: rampColor((rampBucket(r.t) + 0.5) / MP_RAMP_STEPS) })) });
+        } else {
+          // rowsPlot=0 fallback: opaque Shapes, one item per ramp bucket
+          const buckets = [];
+          for (const r of mp.rows) {
+            if (!(r.frac > 0) || !(r.h > 0)) continue;
+            const h = r.h * VIS.rowFill;
+            const pLo = r.price - h / 2, pHi = r.price + h / 2;
+            const bkt = rampBucket(r.t);
+            if (!buckets[bkt]) buckets[bkt] = [];
+            buckets[bkt].push(duMode
+              ? slotRect(sx, Math.max(VIS.minRowBars, r.frac * wS), pLo, pHi)
+              : pxrect(six, Math.max(VIS.minRowPx, Math.round(r.frac * wS)), pLo, pHi));
+          }
+          for (let bkt = 0; bkt < MP_RAMP_STEPS; bkt++)
+            if (buckets[bkt])
+              items.push({ tag: "Shapes", key: K + "C" + bkt, global: true,
+                primitives: buckets[bkt],
+                fillStyle: { color: rampColor((bkt + 0.5) / MP_RAMP_STEPS) } });
         }
-        for (let bkt = 0; bkt < MP_RAMP_STEPS; bkt++)
-          if (buckets[bkt])
-            items.push({ tag: "Shapes", key: K + "C" + bkt, global: true,
-              primitives: buckets[bkt],
-              fillStyle: { color: rampColor((bkt + 0.5) / MP_RAMP_STEPS) } });
         // median line across the profile width; prominent = thick yellow
         items.push({ tag: "LineSegments", key: K + "M", global: true,
           lines: [{ tag: "Line",
@@ -1823,9 +1846,8 @@ class traderMachell {
     // stays in its own box (sessionProfiles below).
     // devProfile=0: v4 layout -- prior-session histogram projected here.
     const dev = O.dev ? this._devProfile(out) : null;
-    this._plotRows = null;
     if (dev) {
-      if (O.rowsPlot && x0Ok && duMode) {
+      if (rowsToPlotter && x0Ok) {
         // v10: the developing profile moves to the TRANSLUCENT plotter
         // path (live-verified alpha, 2026-08-10) and fills the elapsed
         // day like the finalized sessions -- the 150-bar opaque cap and
@@ -1834,14 +1856,14 @@ class traderMachell {
         // platform's own per-bar plot coordinates.
         // (dev POC row keeps the teal-green dev color, never graded gold
         // -- evidence-honesty rule)
-        this._plotRows = {
-          anchor: x0,
+        this._plotProfiles.push({
+          pri: 0, anchor: x0,
           w: Math.max(8, Math.min(
             Math.round(this.core.dayBars.length * MP_SPAN_FILL), i - x0)),
           rows: dev.rows.map(r => ({ price: r.price, h: r.h * VIS.rowFill,
             frac: r.frac,
             color: r.isPoc ? COLORS.dev : (r.inVA ? COLORS.profileVA : COLORS.profile) })),
-        };
+        });
       } else if (histOk)
         // fallback path (rowsPlot=0): the v9.3 opaque Shapes rows with
         // the occlusion-limiting 150-bar cap
@@ -1957,8 +1979,14 @@ class traderMachell {
           if (duMode) wCap = Math.min(wCap, i - 12 - ia);
           if (!duMode || wCap >= 8) {
             emits.apro = ia + "w" + wCap;
-            items.push(...histogram("apro", out.accum.rows, ia, 1,
-              COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
+            if (rowsToPlotter)
+              this._plotProfiles.push({ pri: 2, anchor: ia, w: wCap,
+                rows: out.accum.rows.filter(r => r.frac > 0 && r.h > 0)
+                  .map(r => ({ price: r.price, h: r.h * VIS.rowFill, frac: r.frac,
+                    color: r.isPoc ? COLORS.accPocRow : COLORS.accHist })) });
+            else
+              items.push(...histogram("apro", out.accum.rows, ia, 1,
+                COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
           }
         }
       }
@@ -2062,6 +2090,13 @@ class traderMachell {
         "ALIGN TEST: white POC ray must bisect the magenta row. Row ABOVE ray => set RECT_Y_ANCHOR='top'",
         COLORS.test, FONT_SM));
     }
+
+    // finalize the plotter payload: priority order (dev, sessions,
+    // ACCUM, HTF mirror) so budget exhaustion degrades the tail first;
+    // sessions keep publish order (oldest..newest) within their tier
+    if (this._plotProfiles.length)
+      this._plotProfiles.sort((a, b) => (a.pri || 0) - (b.pri || 0));
+    else this._plotProfiles = null;
 
     // ---- right-edge labels, de-collided ----
     // At coarse timeframes the viewport shows weeks, so labels many
@@ -2312,38 +2347,48 @@ function vaFillPlotter(canvas, instance, history) {
     // arises on this path. Drawn as one bar-wide vertical strip per
     // column per contiguous same-color row run (the community zone
     // technique), with a stroke budget. ----
-    const PR = instance._plotRows;
-    if (PR && pBool(props.rowsPlot, true)) {
+    const profiles = instance._plotProfiles;
+    if (profiles && profiles.length && pBool(props.rowsPlot, true)) {
       let rOp = Number(props.rowOpacity);
       if (!Number.isFinite(rOp)) rOp = 20;
       rOp = Math.max(0, Math.min(100, rOp)) / 100;
       if (rOp <= 0) return;
+      // one budget across all profiles; publishers order the list by
+      // importance (dev, sessions newest-first, ACCUM, HTF mirror) so
+      // exhaustion degrades the least-important layer first
       let budget = 12000;
-      const jEnd = Math.min(PR.anchor + PR.w, history.data.length - 1);
-      for (let j = PR.anchor; j <= jEnd && budget > 0; j++) {
-        const item = history.get(j);
-        if (!item) continue;
-        const x = plt.x.get(item);
-        const d = j - PR.anchor;
-        // merge consecutive covered rows of the same color into strips
-        let runLo = null, runHi = null, runColor = null;
-        for (let r = 0; r <= PR.rows.length; r++) {
-          const row = PR.rows[r];
-          const covered = !!row && (row.frac * PR.w) > d && row.h > 0;
-          const col = covered ? row.color : null;
-          if (covered && col === runColor) {
-            runHi = row.price + (row.h * 0.5);
-            continue;
-          }
-          if (runColor !== null && budget > 0) {
-            canvas.drawLine(plt.offset(x, runLo), plt.offset(x, runHi),
-              { color: runColor, relativeWidth: 1, opacity: rOp });
-            budget--;
-          }
-          runColor = col;
-          if (covered) {
-            runLo = row.price - (row.h * 0.5);
-            runHi = row.price + (row.h * 0.5);
+      for (const PR of profiles) {
+        if (budget <= 0) break;
+        const dir = PR.dir || 1;
+        const jFrom = dir > 0 ? PR.anchor : Math.max(0, PR.anchor - PR.w);
+        const jTo = dir > 0
+          ? Math.min(PR.anchor + PR.w, history.data.length - 1)
+          : Math.min(PR.anchor, history.data.length - 1);
+        for (let j = jFrom; j <= jTo && budget > 0; j++) {
+          const item = history.get(j);
+          if (!item) continue;
+          const x = plt.x.get(item);
+          const d = dir > 0 ? j - PR.anchor : PR.anchor - j;
+          // merge consecutive covered rows of the same color into strips
+          let runLo = null, runHi = null, runColor = null;
+          for (let r = 0; r <= PR.rows.length; r++) {
+            const row = PR.rows[r];
+            const covered = !!row && (row.frac * PR.w) > d && row.h > 0;
+            const col = covered ? row.color : null;
+            if (covered && col === runColor) {
+              runHi = row.price + (row.h * 0.5);
+              continue;
+            }
+            if (runColor !== null && budget > 0) {
+              canvas.drawLine(plt.offset(x, runLo), plt.offset(x, runHi),
+                { color: runColor, relativeWidth: 1, opacity: rOp });
+              budget--;
+            }
+            runColor = col;
+            if (covered) {
+              runLo = row.price - (row.h * 0.5);
+              runHi = row.price + (row.h * 0.5);
+            }
           }
         }
       }

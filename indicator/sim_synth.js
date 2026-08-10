@@ -533,7 +533,7 @@ if (aln.length) {
   {
     const P = 700, M = 6000;
     const inst = new Calc();
-    inst.props = { htfSessions: 20 };
+    inst.props = { htfSessions: 20, rowsPlot: '0' };
     inst.contractInfo = { tickSize: 0.1 };
     inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
     inst.init();
@@ -567,7 +567,7 @@ if (aln.length) {
   {
     const M = 6000, gapLo = M + 40, gapHi = M + 70;
     const inst = new Calc();
-    inst.props = { htfSessions: 20 };
+    inst.props = { htfSessions: 20, rowsPlot: '0' };
     inst.contractInfo = { tickSize: 0.1 };
     inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
     inst.init();
@@ -636,7 +636,7 @@ if (aln.length) {
   const sunday = bars.slice(2 * SESS, 2 * SESS + LIVE)
     .map(b => Object.assign({}, b, { tMs: b.tMs + gapMs }));
   const inst = new Calc();
-  inst.props = { htfSessions: 20 };
+  inst.props = { htfSessions: 20, rowsPlot: '0' };
   inst.contractInfo = { tickSize: 0.1 };
   inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
   inst.init();
@@ -1164,7 +1164,7 @@ if (aln.length) {
   const src15 = bars.slice(0, 2 * 1380 + 600);   // two sessions + a tail
   const runTf = k => {
     const inst = new Calc();
-    inst.props = { htfSessions: 20, duTime: '1' };
+    inst.props = { htfSessions: 20, duTime: '1', rowsPlot: '0' };
     inst.contractInfo = { tickSize: 0.1 };
     inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: k };
     inst.init();
@@ -1370,7 +1370,7 @@ if (aln.length) {
     .map(b => Object.assign({}, b, { tMs: b.tMs + gapMs }));
   const all17 = thuFri.concat(sunday);
   const inst = new Calc();
-  inst.props = { htfSessions: 20, duTime: '1', diag: 1 };
+  inst.props = { htfSessions: 20, duTime: '1', diag: 1, rowsPlot: '0' };
   inst.contractInfo = { tickSize: 0.1 };
   inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
   inst.init();
@@ -1458,7 +1458,7 @@ if (aln.length) {
     return [...m.values()].sort((a, b) => a.tMs - b.tMs);
   };
   const inst30 = new Calc();
-  inst30.props = { htfSessions: 20 };
+  inst30.props = { htfSessions: 20, rowsPlot: '0' };
   inst30.contractInfo = { tickSize: 0.1 };
   inst30.chartDescription = { underlyingType: 'MinuteBar', elementSize: 30 };
   inst30.init();
@@ -1503,7 +1503,7 @@ if (aln.length) {
 // real dataset). --
 {
   const inst = new Calc();
-  inst.props = { htfSessions: 20 };
+  inst.props = { htfSessions: 20, rowsPlot: '0' };
   inst.contractInfo = { tickSize: 0.1 };
   inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
   inst.init();
@@ -1537,8 +1537,9 @@ if (aln.length) {
   // default: Shapes dev rows gone, payload published
   check(it19.every(x => !(x.tag === 'Shapes' && x.key.startsWith('dpro'))),
     'part19: opaque dev rows still drawn with rowsPlot on');
-  const PR19 = inst._plotRows;
-  check(!!PR19, 'part19: plotter row payload missing');
+  const PP19 = inst._plotProfiles;
+  const PR19 = PP19 && PP19.find(x => x.pri === 0);
+  check(!!PP19 && !!PR19, 'part19: plotter row payload missing');
   if (PR19) {
     const x0gt = inst._tailRef(inst.lastOut.dayStartTms, iLast);
     check(PR19.anchor === x0gt, 'part19: payload anchor not chart-index space');
@@ -1557,7 +1558,7 @@ if (aln.length) {
   const draws19 = [];
   const canvas19 = { drawLine: (a, b, s) => draws19.push({ a, b, s }) };
   custom19(canvas19, { props: { rowsPlot: '1', rowOpacity: '35' },
-    _plotRows: PR19 }, hist19);
+    _plotProfiles: [PR19] }, hist19);
   check(draws19.length > 0, 'part19: plotter drew no rows');
   const perCol = {};
   for (const dr of draws19) {
@@ -1577,15 +1578,85 @@ if (aln.length) {
   // rowsPlot off => nothing drawn by the plotter, payload still present
   const draws19b = [];
   custom19({ drawLine: (a, b, s) => draws19b.push(1) },
-    { props: { rowsPlot: '0' }, _plotRows: PR19 }, hist19);
+    { props: { rowsPlot: '0' }, _plotProfiles: [PR19] }, hist19);
   check(draws19b.length === 0, 'part19: rows drawn despite rowsPlot=0');
   // rowsPlot='0' at the frame level restores the v9.3 Shapes path
   inst.props = Object.assign({}, inst.props, { rowsPlot: '0' });
   const it19b = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
   check(it19b.some(x => x.tag === 'Shapes' && x.key.startsWith('dpro')),
     'part19: v9.3 fallback rows missing with rowsPlot=0');
-  check(inst._plotRows === null, 'part19: payload not cleared in fallback mode');
+  check(inst._plotProfiles === null, 'part19: payload not cleared in fallback mode');
   console.log('part19 plotter rows:        day-wide payload, strips, merge, fallback OK');
+}
+
+// -- part 20: full row migration (v10.1, green-lit after the live v10
+// verification). With rowsPlot on, session/ACCUM/HTF row fills leave the
+// Shapes path too: payloads carry ramp colors (sessions), family colors
+// (ACCUM/HTF), the HTF mirror grows LEFT, the list is priority-ordered,
+// and rowsPlot=0 restores every Shapes family exactly. --
+{
+  const R20 = runModel('A', 400, { htfSessions: 20 });   // rowsPlot default ON
+  const inst = R20.inst;
+  const iLast = n - 1;
+  // fabricate an ACCUM window so all four families publish
+  const out20 = inst.lastOut;
+  out20.accum = { level: out20.prev.poc + 1, short: false,
+    start: inst.tmsList[inst.tmsList.length - 400],
+    end: inst.tmsList[inst.tmsList.length - 100],
+    winHi: out20.prev.poc + 2, winLo: out20.prev.poc - 1,
+    rows: [{ price: out20.prev.poc, frac: 1, inVA: true, isPoc: true, h: 0.5 }] };
+  const it20 = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  // no Shapes row fills remain for any family
+  check(it20.every(x => !(x.tag === 'Shapes' &&
+    (/^sp\d+C\d+$/.test(x.key) || x.key.startsWith('hpro') ||
+     x.key.startsWith('apro') || x.key.startsWith('dpro')))),
+    'part20: Shapes row fills still present with rowsPlot on');
+  // structural non-fill items stay as graphics (medians, brackets, box)
+  check(it20.some(x => /^sp\d+M$/.test(x.key)) && it20.some(x => /^sp\d+B$/.test(x.key)),
+    'part20: session medians/brackets missing');
+  check(it20.some(x => x.key === 'accB'), 'part20: ACCUM box missing');
+  const PP = inst._plotProfiles;
+  check(!!PP && PP.length >= 4, 'part20: expected >=4 payloads, got ' + (PP ? PP.length : 0));
+  // priority order: dev first, HTF mirror last
+  for (let j = 1; j < PP.length; j++)
+    check((PP[j - 1].pri || 0) <= (PP[j].pri || 0), 'part20: payloads not priority-sorted');
+  check(PP[0].pri === 0 && PP[PP.length - 1].pri === 3, 'part20: dev/HTF not at the ends');
+  const sess20 = PP.filter(x => x.pri === 1);
+  check(sess20.length > 0, 'part20: no session payloads');
+  const rampRe20 = /^#([0-9A-F]{2})00([0-9A-F]{2})$/;
+  for (const sp of sess20)
+    for (const r of sp.rows) {
+      const m20 = r.color.match(rampRe20);
+      check(!!m20 && parseInt(m20[1], 16) + parseInt(m20[2], 16) === 255,
+        'part20: session payload color off the ramp: ' + r.color);
+    }
+  const htf20 = PP.find(x => x.pri === 3);
+  check(!!htf20 && htf20.dir === -1, 'part20: HTF payload not a left mirror');
+  // plotter: HTF strokes land at x <= anchor; total obeys the budget
+  const custom20 = (mod.plotter || []).find(pl => pl && pl.type === 'custom').fn;
+  const draws20 = [];
+  custom20({ drawLine: (a, b, s) => draws20.push({ a, b, s }) },
+    { props: {}, _plotProfiles: [htf20] },
+    { data: { length: iLast + 1 }, get: j => ({ __x: j }) });
+  check(draws20.length > 0, 'part20: plotter drew nothing for the HTF mirror');
+  for (const dr of draws20)
+    check(dr.a.x <= htf20.anchor && dr.a.x >= htf20.anchor - htf20.w,
+      'part20: HTF stroke outside the mirror span');
+  const drawsAll = [];
+  custom20({ drawLine: () => drawsAll.push(1) },
+    { props: {}, _plotProfiles: PP },
+    { data: { length: iLast + 1 }, get: j => ({ __x: j }) });
+  check(drawsAll.length > 0 && drawsAll.length <= 12000,
+    'part20: stroke budget violated: ' + drawsAll.length);
+  // rowsPlot='0' restores every Shapes family (ACCUM fixture still set)
+  inst.props = Object.assign({}, inst.props, { rowsPlot: '0' });
+  const it20b = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  check(it20b.some(x => /^sp\d+C\d+$/.test(x.key)) &&
+    it20b.some(x => x.key.startsWith('hpro')) &&
+    it20b.some(x => x.key.startsWith('apro')) &&
+    it20b.some(x => x.key.startsWith('dpro')),
+    'part20: Shapes families not restored with rowsPlot=0');
+  console.log('part20 full row migration:  payloads, ramp, mirror, budget, fallback OK');
 }
 
 const kindsOf = c => {
