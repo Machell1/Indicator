@@ -279,3 +279,37 @@ placed; position stayed 0, equity unchanged; cleared by reload). Chart
 canvas clicks are now off-limits during testing; use the Elements panel
 route only, and verify the settings dialog is actually open (screenshot)
 before clicking any coordinate inside it.
+
+---
+
+# §8 — v9.2 LIVE ON 30M (2026-08-11 00:02 CDT): SLAB FIXED
+
+Deployed v9.2 and re-checked the same 30M viewport.
+
+**BROKEN 1 is fixed.** The ~4-day full-height olive slab is gone; the
+08/05-08/09 rally renders as candles again. Every session profile now
+draws as a narrow gauge beside its own session -- Blue->Red graded, with
+white VA brackets hugging the rows, exactly the MP_55396 reading. The
+gauge-width semantics (anchor transformed once, width emitted as a raw
+slot count equal to bar count) behave on the real platform, and the
+weekend-gap stretch that produced the slab does not recur.
+
+**BROKEN 2 improved as designed.** At 30M the per-profile key-value
+stacks are correctly suppressed (sessions < 150 bars), so the
+`POC 4130.1*` / `VAH 4130.9*` overprint from section 7 is gone; the
+right-edge column carries every level: `PREV POC 4402.5*`, `dVAH 4400.2*`,
+`dPOC 4391.9*`, `dVAL 4380.3*`, `VAL 4348.9*`, `HTF VAH 4303.2*`,
+`NPOC 4117.3*`, `HTF POC 4109.4* (20s)`, `HTF VAL 4055.2*`, plus the
+ACCUM line with its `2.4d` provenance suffix.
+
+**Residual (low, cosmetic):** in the top-right cluster the ACCUM text and
+`dVAH/dPOC` still overlap the PREV POC row slightly -- the fan pitch
+helps but does not fully separate a dense right-edge stack at 30M. Tune
+against this frame when convenient; it is readable, not blocking.
+
+**Not yet exercised:** 15M; the `[oversize item]` guard and the new
+`hpro@/apro@/accB@` telemetry have not had to fire on a live frame (by
+design -- nothing oversized was produced). Next time diag is on at a
+coarse timeframe, capture them once to confirm they print.
+
+State: 30M chart clean and readable, position 0, equity unchanged.
