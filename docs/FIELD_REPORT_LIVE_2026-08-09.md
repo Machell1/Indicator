@@ -155,3 +155,30 @@ BARS-BACK numbers would land if drawn as absolute indexes).
 Note the near-coincidence: acc start 2879 bars-back vs cluster at du
 ~2900-3050 on a 3001-bar chart. A bars-back/absolute-index unit confusion
 in the ACCUM/session consumers would produce exactly this geometry.
+
+---
+
+## 7. v6.4 live verification -- CASE CLOSED (deployed 19:07 CDT)
+
+Diag: `anchor=ok@2874 i=3002 base=0 mirror=3002 gap=0 desync=0
+acc=2879..917 emit accB@undefined accL@undefined sp@undefined`
+
+The emit telemetry settles sections 5 and 6 conclusively: the ACCUM box,
+ACCUM ray, and session-profile layers are NOT EMITTED in the live frame
+(v6.4 guards suppress them), no [future-grid item] flag fires, and the
+chart is clean. The "cluster at the live edge" investigated in sections 5
+and 6 was the RIGHT-EDGE LABEL COLUMN + rays passing through -- structure
+misread from compressed screenshots, exactly as the v6.4 audit proposed.
+The only real anchor defect was v6.1's stale stored indexes, fixed in
+v6.2. Sections 5-6 stand as a record of how in-range wrongness was ruled
+out layer by layer.
+
+One follow-up question for the next PR (minor): `accL@undefined` -- the
+ACCUM level ray is also suppressed in this frame. If the intended v6.4
+behavior is "ray edge-anchors with the provenance suffix when the window
+is resolvable" (acc=2879..917 IS in-range here), confirm why the ray
+chose suppression over edge-anchor+suffix; if intended (e.g. box-hidden
+implies ray-hidden), document it in VISUAL_V6_4_EMITTED_GEOMETRY.md.
+
+Session tally: 4 live deployments (v6.1 hot patch, v6.2, v6.3, v6.4),
+205/205 on every one, position 0 and equity unchanged throughout.
