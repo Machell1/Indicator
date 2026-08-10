@@ -947,6 +947,68 @@ if (aln.length) {
   console.log('part11 MP_55396 look:       ramp, medians, bracket, dedupe OK');
 }
 
+// -- part 12: MP day-spanning box rules (field report section 8). A
+// session whose START predates loaded history is never drawn under any
+// fallback and raises the offscreen marker; near-live-edge sessions are
+// skipped by the width cap (du) or the px-mode rule; the sp@ telemetry
+// lists EVERY session (anchor+width, or why it was skipped) so a
+// mis-boxed profile self-identifies in one reading. --
+{
+  const R12 = runModel('A', 500);
+  const inst = R12.inst;
+  const iLast = n - 1;
+  const L12 = inst.tmsList;
+  inst.props = Object.assign({}, inst.props, { diag: 1 });
+  const mkBars = (t0, count, priceLo) => {
+    const out12 = [];
+    for (let j = 0; j < count; j++)
+      out12.push({ tMs: t0 + j * 60e3, o: priceLo + 0.2, c: priceLo + 0.2,
+        h: priceLo + 0.4, l: priceLo, vol: 40, delta: 0 });
+    return out12;
+  };
+  // (a) pre-history session start: no items, offscreen marker, "pre" in sp@
+  const preStart = L12[0] - 86400e3;
+  inst.core.sessions.push({ key: 'PRE', bars: mkBars(preStart, 120, 100),
+    startTms: preStart, rows: null });
+  let it12 = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  check(it12.every(x => !x.key.startsWith('sp' + preStart)),
+    'part12a: pre-history session drawn despite unresolvable start');
+  let s312 = it12.find(x => x.key === 'stat3');
+  check(s312 && s312.text.indexOf('[old anchors offscreen') >= 0,
+    'part12a: offscreen marker missing');
+  let s412 = it12.find(x => x.key === 'stat4');
+  check(s412 && / sp@[^ ]*pre/.test(s412.text),
+    'part12a: telemetry missing "pre" entry: ' + (s412 ? s412.text : ''));
+  // (b) session anchored near the live edge: skipped by the cap, telemetry
+  // says so, and nothing lands in the future grid
+  const nearTs = L12[L12.length - 5];
+  inst.core.sessions.push({ key: 'NEAR',
+    bars: mkBars(nearTs, 200, 100), startTms: nearTs, rows: null });
+  it12 = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  check(it12.every(x => !x.key.startsWith('sp' + nearTs)),
+    'part12b: near-edge session structure drawn');
+  s412 = it12.find(x => x.key === 'stat4');
+  check(s412 && / sp@[^ ]*cap/.test(s412.text),
+    'part12b: telemetry missing "cap" entry: ' + (s412 ? s412.text : ''));
+  s312 = it12.find(x => x.key === 'stat3');
+  check(s312 && s312.text.indexOf('[future-grid') < 0,
+    'part12b: unexpected future-grid flag');
+  // (c) telemetry lists every session in the slice (comma count + entries)
+  const spField = s412 && s412.text.match(/ sp@([^ ]+)/);
+  const nSess = Math.min(6, inst.core.sessions.length);
+  check(!!spField && spField[1].split(',').length === nSess,
+    'part12c: sp@ does not list all sessions: ' + (spField ? spField[1] : 'missing'));
+  // (d) rendered entries carry anchor+width and stay left of the live bar
+  if (spField)
+    for (const e12 of spField[1].split(',')) {
+      const m12 = e12.match(/^(\d+)w(\d+)$/);
+      if (m12)
+        check(Number(m12[1]) + Number(m12[2]) <= iLast - 10,
+          'part12d: rendered session crosses the live bar: ' + e12);
+    }
+  console.log('part12 MP box rules:        pre-history, near-edge, full sp@ telemetry OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

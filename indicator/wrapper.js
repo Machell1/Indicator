@@ -737,6 +737,7 @@ class traderMachell {
     const mism = new Set();
     let offscreen = false;
     const emits = { accB: "-", accL: "-", sp: "-" };  // construction-time telemetry
+    const futureKeys = new Set();   // filled by guards below + the final scan
     const idx = (t, layer) => {
       const r = this._idxOf(t, endIdx, tcache);
       if (r !== undefined) {
@@ -820,16 +821,40 @@ class traderMachell {
     // the v6.4 live-edge cap.
     {
       const sessions = this.core.sessions.slice(-6);
+      const spEmit = [];              // one entry per session, oldest first
       for (const sess of sessions) {
         const six = idx(sess.startTms, "sp");
-        if (six === undefined) continue;
+        if (six === undefined) {
+          // v6.3 rule: a day-spanning box whose START cannot be resolved
+          // is NOT drawn anywhere else -- no fallback of any kind (audit
+          // for field report section 8: no session-END fallback exists
+          // either). When the start predates loaded history, the banner
+          // says so instead of skipping silently.
+          if (this.tmsList.length && sess.startTms < this.tmsList[0]) {
+            offscreen = true;
+            spEmit.push("pre");
+          } else spEmit.push("x");
+          continue;
+        }
         const mp = this._mpSession(sess);
-        if (!mp) continue;
+        if (!mp) { spEmit.push("n"); continue; }
         const wS = duMode
           ? Math.min(Math.round(sess.bars.length * MP_SPAN_FILL), i - 12 - six)
           : VIS.sessMaxPx;
-        if (duMode && wS < 8) continue;
-        if (emits.sp === "-") emits.sp = six;
+        if (duMode && wS < 8) { spEmit.push(six + "cap"); continue; }
+        // px-mode live-edge rule: px row widths cannot be checked in du
+        // space, so near-edge sessions are skipped entirely there
+        if (!duMode && six > i - 60) { spEmit.push(six + "cap"); continue; }
+        // emission-time span guard (spec section 4 defense in depth; the
+        // width cap above makes this unreachable today, but a day-spanning
+        // session structure must NEVER cross the live bar, whatever
+        // upstream produced the numbers)
+        if (duMode && six + wS > i - 10) {
+          futureKeys.add("sp" + sess.startTms + "SPAN");
+          spEmit.push(six + "SPAN");
+          continue;
+        }
+        spEmit.push(six + "w" + wS);
         const K = "sp" + sess.startTms;
         // rows, batched into one Shapes item per ramp bucket
         const buckets = [];
@@ -881,6 +906,11 @@ class traderMachell {
           { key: K + "TL", price: mp.val, text: "VAL " + fmt(mp.val), color: "#FFFFFF", font: FONT_XS },
         ], six + wS + 2, out.atr || 0));
       }
+      // full per-session telemetry (field report section 8: the culprit
+      // must self-identify): anchor+width per rendered session, "pre" =
+      // start predates loaded history, "x" = unresolved, "n" = no
+      // profile, "<x>cap"/"<x>SPAN" = skipped by a live-edge guard
+      if (spEmit.length) emits.sp = spEmit.join(",");
     }
 
     // ---- the CURRENT session's box (SVP layout) ----
@@ -1118,7 +1148,6 @@ class traderMachell {
     // NAMED on the banner instead of painting the future grid. Text is
     // exempt (the label column at i+4 is the designed exception).
     const xCap = i + 2;
-    const futureKeys = new Set();
     for (let n2 = items.length - 1; n2 >= 0; n2--) {
       const it = items[n2];
       let bad = false;
