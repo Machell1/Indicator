@@ -180,3 +180,34 @@ total profile coverage to a fraction of the viewport.
 15M and 30M were not reached — the 1M return path failed first and the
 chart was restored for trading. Re-run the full four-way toggle after the
 loop fix.
+
+---
+
+# §6 — v9.1 LIVE RE-RUN (2026-08-10 23:15-23:22 CDT): RESET LOOP FIXED
+
+Deployed v9.1 and re-ran the failing path first.
+
+**1M -> 5M -> 1M round trip: PASS.** The exact sequence that left the
+indicator permanently dead under v9 (stuck `tf=MinuteBar/5 barMin=5
+i=3 mirror=3`, all layers suppressed, reloading banner never clearing,
+F5-only recovery) now recovers on its own within a bar. Post-round-trip
+frame on 1M: prev/dev profile drawn ON its own candles at the session
+start, `PREV POC 4407.9` with NO star (correct -- barMin back to 1, so
+the graded basis is restored and the disclosure correctly disappears),
+`dVAH 4398.3 / dPOC 4384.8 / dVAL 4377.5` tracking live price, no
+`[timeframe changed - reloading]` residue, no `[reset loop - press F5]`
+escalation. The observed-spacing derivation + stale-description distrust
+does what it claims on the real platform.
+
+Note the star behaviour is itself a clean end-to-end proof: `*` appeared
+on every profile-derived label at 5M and vanished at 1M, which means
+`barMin` was genuinely re-derived (not merely reset) in both directions.
+
+## Still queued (unchanged priority)
+
+1. 15M / 30M first contact -- not yet reached in a live session.
+2. The profile-width wall at 5M+ with many sessions visible (cosmetic).
+3. `staleCd=` observation over more switches, to answer whether the
+   description staleness is one-shot or persistent (the one residual gap
+   Cursor flagged: returning to exactly the stale timeframe is
+   unprovable from spacing alone).
