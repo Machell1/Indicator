@@ -1255,6 +1255,101 @@ if (aln.length) {
     drift.join('  ') + '; live switch reset OK');
 }
 
+// -- part 16: the 5M->1M reset loop (TIMEFRAME_ANCHORING_SPEC.md sec 5).
+// chartDescription stays STALE at MinuteBar/5 after the chart is on
+// 1-minute; the fixed detector must derive the new period from observed
+// spacing (one finer bar is proof), reset ONCE, ignore the stale
+// description afterwards, and revive the chart. Sustained flapping must
+// escalate to [reset loop - press F5] with the indicator kept alive. --
+{
+  const agg16 = (src, k) => {
+    const m = new Map();
+    for (const b of src) {
+      const slot = Math.floor(b.tMs / (k * 60e3)) * k * 60e3;
+      let e = m.get(slot);
+      if (!e) { e = { tMs: slot, o: b.o, h: b.h, l: b.l, c: b.c, vol: 0, offv: 0, bidv: 0 }; m.set(slot, e); }
+      if (b.h > e.h) e.h = b.h;
+      if (b.l < e.l) e.l = b.l;
+      e.c = b.c; e.vol += b.vol; e.offv += b.offv; e.bidv += b.bidv;
+    }
+    return [...m.values()].sort((a, b) => a.tMs - b.tMs);
+  };
+  // phase 1: healthy 5M chart (description correct)
+  const inst = new Calc();
+  inst.props = { htfSessions: 20, diag: 1 };
+  inst.contractInfo = { tickSize: 0.1 };
+  inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 5 };
+  inst.init();
+  const CUT = 2200;
+  const ents5 = agg16(bars.slice(0, CUT), 5).map((b, j, arr) =>
+    entity(b, j === arr.length - 1, true));
+  for (let j = 0; j < ents5.length; j++)
+    inst.map(ents5[j], j, makeHistory(ents5.slice(0, j + 1)));
+  check(inst.barMin === 5, 'part16: 5M phase barMin wrong');
+  const resets0 = (inst._resetTimes || []).length;
+  // phase 2: chart switches to 1M and re-feeds the whole array at 1-min,
+  // but chartDescription REMAINS STALE at MinuteBar/5 (the live failure)
+  const ents1 = bars.slice(0, CUT + 90).map((b, j, arr) =>
+    entity(b, j === arr.length - 1, j < arr.length - 1));
+  let res16 = null;
+  for (let j = 0; j < ents1.length; j++)
+    res16 = inst.map(ents1[j], j, makeHistory(ents1.slice(0, j + 1)));
+  const resets1 = (inst._resetTimes || []).length - resets0;
+  check(inst.barMin === 1,
+    'part16: barMin not derived from observed spacing (still ' + inst.barMin + ')');
+  check(resets1 === 1, 'part16: expected exactly 1 reset, got ' + resets1);
+  check(!inst._resetLoop, 'part16: false reset-loop escalation');
+  check(inst.tmsList.length > 50,
+    'part16: mirror did not regrow (' + inst.tmsList.length + ') -- the dead-chart state');
+  check(inst.tmsList[1] - inst.tmsList[0] === 60e3,
+    'part16: mirror spacing not 1-minute after recovery');
+  const it16 = res16.graphics.items;
+  check(it16.some(x => x.key === 'dayLn'), 'part16: layers still suppressed after recovery');
+  const s316 = it16.find(x => x.key === 'stat3');
+  check(s316 && s316.text.indexOf('[timeframe changed') < 0 &&
+    s316.text.indexOf('[reset loop') < 0,
+    'part16: stuck banner after recovery: ' + (s316 ? s316.text : '-'));
+  const s416 = it16.find(x => x.key === 'stat4');
+  check(s416 && s416.text.indexOf('tf=MinuteBar/5') >= 0 &&
+    s416.text.indexOf('barMin=1') >= 0 && s416.text.indexOf('staleCd=5') >= 0,
+    'part16: diag does not show the stale-description override');
+  // phase 3: description re-syncs to 1 -> distrust clears; a later PROPER
+  // switch to 5M (description updates) must fire detector A again
+  inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  const tick1 = entity(Object.assign({}, bars[CUT + 90],
+    { tMs: bars[CUT + 90].tMs }), true, true);
+  inst.map(tick1, ents1.length, makeHistory(ents1.concat([tick1])));
+  check(inst._staleCd === null, 'part16: stale flag not cleared after cd re-sync');
+  inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 5 };
+  const ents5b = agg16(bars.slice(0, CUT + 200), 5).map((b, j, arr) =>
+    entity(b, j === arr.length - 1, true));
+  for (let j = 0; j < 40; j++)
+    inst.map(ents5b[j], j, makeHistory(ents5b.slice(0, j + 1)));
+  check(inst.barMin === 5, 'part16: proper re-switch to 5M missed after stale episode');
+
+  // phase 4: pathological description flapping -> escalation, alive
+  const inst4 = new Calc();
+  inst4.props = { htfSessions: 20 };
+  inst4.contractInfo = { tickSize: 0.1 };
+  inst4.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  inst4.init();
+  const ents4 = bars.slice(0, 200).map((b, j, arr) =>
+    entity(b, j === arr.length - 1, true));
+  let res4 = null;
+  for (let j = 0; j < ents4.length; j++) {
+    inst4.chartDescription = { underlyingType: 'MinuteBar',
+      elementSize: (j % 2) ? 5 : 1 };
+    res4 = inst4.map(ents4[j], j, makeHistory(ents4.slice(0, j + 1)));
+  }
+  check(inst4._resetLoop === true, 'part16: flapping did not escalate');
+  const s3l = res4.graphics.items.find(x => x.key === 'stat3');
+  check(s3l && s3l.text.indexOf('[reset loop - press F5]') >= 0,
+    'part16: escalation banner missing');
+  check(inst4.tmsList.length > 50,
+    'part16: indicator not kept alive under escalation (' + inst4.tmsList.length + ')');
+  console.log('part16 reset-loop fix:      derive-from-data, single reset, revive, escalate OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

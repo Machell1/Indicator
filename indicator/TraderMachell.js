@@ -1066,13 +1066,22 @@ function layoutLabels(labels, lx, atr) {
 }
 
 class traderMachell {
-  init() {
+  // bmOverride: a timeframe-change reset passes the period DERIVED FROM
+  // OBSERVED BAR SPACING here, because chartDescription is known-stale in
+  // that path (the 5M->1M infinite reset loop, spec section 5). The
+  // platform's own init() call passes nothing and reads chartDescription
+  // as before. Fields deliberately NOT assigned here survive resets:
+  // _resetTimes, _staleCd, _resetLoop (see _checkTimeframe).
+  init(bmOverride) {
     let barMin = 1;
     const cd = this.chartDescription;
     this.timeBased = !cd || cd.underlyingType === "MinuteBar";
     if (cd && cd.underlyingType === "MinuteBar" && cd.elementSize > 0)
       barMin = cd.elementSize;
+    if (bmOverride) barMin = bmOverride;
     this.barMin = barMin;
+    this._obsDeltas = [];         // inter-bar spacing samples since reset
+    this._obsFor = 0;             // last bar timestamp sampled
     const s = (mins, floor) => Math.max(floor || 5, Math.round(mins / barMin));
     this.core = new DaleCore({
       barMinutes: barMin,
@@ -1118,30 +1127,66 @@ class traderMachell {
     this._tfReset = false;        // a timeframe change just rebuilt state
   }
 
-  // ---- timeframe-change detection (TIMEFRAME_ANCHORING_SPEC.md sec 1) ----
-  // The trader toggles 1M/5M/15M/30M constantly, and the platform is
-  // KNOWN to keep a graphics indicator's state across a timeframe change
-  // (community-reported: values stay stale until re-save/re-add). A stale
-  // mirror carries (index, timestamp) pairs at the OLD bar spacing, so
-  // _slotOf interpolates wrongly and every emitted x displaces by the
-  // timeframe ratio. Two independent detectors, both cheap, run on every
-  // map call; either one triggers a FULL self-reset (fresh core, mirror,
-  // caches, barMin, caps) and a banner state while the mirror refills.
+  // ---- timeframe-change detection (TIMEFRAME_ANCHORING_SPEC.md sec 1+5) ----
+  // The platform keeps a graphics indicator's state across a timeframe
+  // change AND chartDescription can stay STALE at the old timeframe
+  // (section 5, live-proven: after 5M->1M the description still read
+  // MinuteBar/5). v9's reset re-read that stale description and trapped
+  // the indicator in an infinite reset loop (mirror wiped every bar,
+  // chart dead until F5). Rules now:
+  //  - detector A (chartDescription) handles proper switches in both
+  //    directions, but is suppressed while the description still shows a
+  //    value we have PROVEN stale;
+  //  - detector B (observed spacing) handles the stale-description case:
+  //    an inter-bar spacing BELOW the known period is impossible on a
+  //    legitimate feed, so one finer bar is proof. The new period is
+  //    DERIVED FROM THE DATA -- chartDescription is not consulted in
+  //    this branch (it is stale by definition);
+  //  - resets are rate-limited; sustained flapping escalates to a
+  //    [reset loop - press F5] banner with the indicator kept ALIVE at
+  //    its current settings instead of dead.
   _checkTimeframe(d) {
+    if (this._resetLoop) return;
     const cd = this.chartDescription;
-    const em = (cd && cd.underlyingType === "MinuteBar" && cd.elementSize > 0)
-      ? cd.elementSize : this.barMin;
+    const cdSize = (cd && cd.underlyingType === "MinuteBar" && cd.elementSize > 0)
+      ? cd.elementSize : null;
+    const stale = this._staleCd || null;
+    // once the platform's description agrees with reality again, trust it
+    if (cdSize !== null && cdSize === this.barMin && stale !== null)
+      this._staleCd = null;
+    // one spacing sample per NEW bar timestamp
     const dMs = d.timestamp().getTime();
-    // a NEW bar arriving finer than the known period is the same signal
-    // from the data side (elementSize may lag or be unavailable);
-    // coarser deltas are indistinguishable from session gaps and are
-    // covered by the elementSize read
-    const finer = this.lastPushedMs > 0 && dMs > this.lastPushedMs &&
-      dMs - this.lastPushedMs < this.barMin * 60e3;
-    if (em !== this.barMin || finer) {
-      this.init();
-      this._tfReset = true;
+    if (this.lastPushedMs > 0 && dMs > this.lastPushedMs && dMs !== this._obsFor) {
+      this._obsFor = dMs;
+      this._obsDeltas.push(dMs - this.lastPushedMs);
+      if (this._obsDeltas.length > 6) this._obsDeltas.shift();
     }
+    // A) proper switch reported by the platform
+    if (cdSize !== null && cdSize !== this.barMin && cdSize !== stale) {
+      this._reset(cdSize, null);
+      return;
+    }
+    // B) the feed is finer than the known period (stale-description case)
+    const per = this.barMin * 60e3;
+    const finer = this._obsDeltas.filter(dl => dl < per);
+    if (finer.length >= 1) {
+      const inferred = Math.max(1, Math.round(Math.min.apply(null, finer) / 60e3));
+      this._reset(inferred, cdSize);
+    }
+  }
+
+  _reset(newBarMin, staleCd) {
+    const now = Date.now();
+    this._resetTimes = (this._resetTimes || []).filter(t => now - t < 60e3);
+    this._resetTimes.push(now);
+    if (this._resetTimes.length > 3) {
+      // flapping: stop resetting, stay alive, surface the remedy
+      this._resetLoop = true;
+      return;
+    }
+    this.init(newBarMin);
+    this._staleCd = staleCd;
+    this._tfReset = true;
   }
 
   // effective options, re-derived EVERY draw from coerced props (field
@@ -1369,7 +1414,11 @@ class traderMachell {
       let k = i - 1;
       let sawBoundary = false;
       const backlog = [], idxs = [];
-      while (k >= 0 && backlog.length < 500) {
+      // after a timeframe reset the mirror is empty ON PURPOSE: allow one
+      // deep backfill so PREV/HTF context rebuilds without an F5 (the
+      // normal 500 cap only bounds steady-state per-call work)
+      const cap = this._tfReset ? 6000 : 500;
+      while (k >= 0 && backlog.length < cap) {
         const e = history.get(k);
         if (!e || typeof e.timestamp !== "function") break;
         const eMs = e.timestamp().getTime();
@@ -2062,7 +2111,8 @@ class traderMachell {
         this.barMin + "-min-bin levels");
     if (this.barMin > 30)
       ctx.push("UNSUPPORTED TIMEFRAME - use 1M-30M (1M = graded basis)");
-    if (this._tfReset) {
+    if (this._resetLoop) ctx.push("[reset loop - press F5]");
+    else if (this._tfReset) {
       if (this.tmsList.length > 50) this._tfReset = false;
       else ctx.push("[timeframe changed - reloading]");
     }
@@ -2116,6 +2166,8 @@ class traderMachell {
       items.push(frameTxt("stat4", 70, 72,
         "tf=" + (cd4 ? cd4.underlyingType + "/" + cd4.elementSize : "none") +
         " barMin=" + this.barMin +
+        " rst=" + ((this._resetTimes && this._resetTimes.length) || 0) +
+        (this._staleCd ? " staleCd=" + this._staleCd : "") +
         " anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
         " i=" + i + " base=" + this.idxBase + " mirror=" + this.tmsList.length +
         " gap=" + (this.mirrorGapped ? 1 : 0) +
