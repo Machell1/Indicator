@@ -1632,6 +1632,21 @@ if (aln.length) {
     }
   const htf20 = PP.find(x => x.pri === 3);
   check(!!htf20 && htf20.dir === -1, 'part20: HTF payload not a left mirror');
+  // per-family emphasis (section 10): dev prominent, history quieter,
+  // HTF faintest -- and the plotter must apply rowOpacity x opMul
+  check(PP[0].opMul === 1.0, 'part20: dev emphasis not 1.0');
+  check(sess20.every(x => x.opMul === 0.5), 'part20: session emphasis not 0.5');
+  check(htf20.opMul === 0.4, 'part20: HTF emphasis not 0.4');
+  {
+    const drawsE = [];
+    const custom20e = (mod.plotter || []).find(pl => pl && pl.type === 'custom').fn;
+    custom20e({ drawLine: (a, b, s) => drawsE.push(s.opacity) },
+      { props: { rowOpacity: '40' }, _plotProfiles: [sess20[0]] },
+      { data: { length: iLast + 1 }, get: j => ({ __x: j }) });
+    check(drawsE.length > 0 && drawsE.every(o => Math.abs(o - 0.2) < 1e-9),
+      'part20: emphasis multiplier not applied (want 0.40*0.5=0.20, got ' +
+      drawsE[0] + ')');
+  }
   // plotter: HTF strokes land at x <= anchor; total obeys the budget
   const custom20 = (mod.plotter || []).find(pl => pl && pl.type === 'custom').fn;
   const draws20 = [];

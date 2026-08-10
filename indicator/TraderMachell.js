@@ -893,6 +893,14 @@ const FONT_XS = { fontSize: 10, fontWeight: "normal" };
 const MP_RAMP_STEPS = 10;
 const MP_SPAN_FILL = 0.85;   // max row width as a fraction of the session's bar span
 const MP_PROMINENT = 0.8;    // POC-row bar coverage for a "prominent median"
+// PER-FAMILY EMPHASIS (assessment section 10, tuned against the 5M
+// patchwork frame): with every profile full-width AND translucent,
+// neighbouring families share screen space and their opacities compound.
+// The single rowOpacity knob still scales everything; these multipliers
+// fix the RELATIVE emphasis -- the developing profile (the working
+// context) stays prominent, history reads legible-not-prominent, the
+// HTF mirror is the faintest backdrop.
+const ROW_EMPHASIS = { dev: 1.0, session: 0.5, accum: 0.7, htf: 0.4 };
 // WIDTH POLICY (docs/VISUAL_V9_3_ONE_MINUTE.md, a stated decision):
 // FINALIZED session profiles fill MP_SPAN_FILL of their day at every
 // timeframe (the MT5 look). The DEVELOPING/current-session profile and
@@ -1705,7 +1713,7 @@ class traderMachell {
       const wH = Math.min(this.wHtf, x0);
       emits.hpro = x0 + "w" + wH;
       if (rowsToPlotter) {
-        this._plotProfiles.push({ pri: 3, anchor: x0, w: wH, dir: -1,
+        this._plotProfiles.push({ pri: 3, opMul: ROW_EMPHASIS.htf, anchor: x0, w: wH, dir: -1,
           rows: out.htfRows.map(r => ({ price: r.price, h: (r.h || 0) * VIS.rowFill,
             frac: r.frac,
             color: r.isPoc ? COLORS.htfPocRow : COLORS.htfGhost })) });
@@ -1769,7 +1777,7 @@ class traderMachell {
           // v10.1: session rows ride the plotter path, keeping their
           // Blue->Red ramp per row (bucketed colors, same visual identity
           // as the Shapes path)
-          this._plotProfiles.push({ pri: 1, anchor: six, w: wS,
+          this._plotProfiles.push({ pri: 1, opMul: ROW_EMPHASIS.session, anchor: six, w: wS,
             rows: mp.rows.filter(r => r.frac > 0 && r.h > 0)
               .map(r => ({ price: r.price, h: r.h * VIS.rowFill, frac: r.frac,
                 color: rampColor((rampBucket(r.t) + 0.5) / MP_RAMP_STEPS) })) });
@@ -1857,7 +1865,7 @@ class traderMachell {
         // (dev POC row keeps the teal-green dev color, never graded gold
         // -- evidence-honesty rule)
         this._plotProfiles.push({
-          pri: 0, anchor: x0,
+          pri: 0, opMul: ROW_EMPHASIS.dev, anchor: x0,
           w: Math.max(8, Math.min(
             Math.round(this.core.dayBars.length * MP_SPAN_FILL), i - x0)),
           rows: dev.rows.map(r => ({ price: r.price, h: r.h * VIS.rowFill,
@@ -1980,7 +1988,7 @@ class traderMachell {
           if (!duMode || wCap >= 8) {
             emits.apro = ia + "w" + wCap;
             if (rowsToPlotter)
-              this._plotProfiles.push({ pri: 2, anchor: ia, w: wCap,
+              this._plotProfiles.push({ pri: 2, opMul: ROW_EMPHASIS.accum, anchor: ia, w: wCap,
                 rows: out.accum.rows.filter(r => r.frac > 0 && r.h > 0)
                   .map(r => ({ price: r.price, h: r.h * VIS.rowFill, frac: r.frac,
                     color: r.isPoc ? COLORS.accPocRow : COLORS.accHist })) });
@@ -2359,6 +2367,8 @@ function vaFillPlotter(canvas, instance, history) {
       let budget = 12000;
       for (const PR of profiles) {
         if (budget <= 0) break;
+        // per-family emphasis: rowOpacity x the payload's multiplier
+        const opEff = Math.max(0.01, Math.min(1, rOp * (PR.opMul || 1)));
         const dir = PR.dir || 1;
         const jFrom = dir > 0 ? PR.anchor : Math.max(0, PR.anchor - PR.w);
         const jTo = dir > 0
@@ -2381,7 +2391,7 @@ function vaFillPlotter(canvas, instance, history) {
             }
             if (runColor !== null && budget > 0) {
               canvas.drawLine(plt.offset(x, runLo), plt.offset(x, runHi),
-                { color: runColor, relativeWidth: 1, opacity: rOp });
+                { color: runColor, relativeWidth: 1, opacity: opEff });
               budget--;
             }
             runColor = col;
