@@ -104,3 +104,79 @@ outranks the cosmetic fix. Options, in preference order:
   the profile, medians, VA brackets and rays stay on their own candles at
   every step, with `diag=1` printing `barMin` and the raw
   `underlyingType`/`elementSize` for each.
+
+---
+
+# §5 — v9 LIVE TOGGLE TEST RESULT (2026-08-10 22:50-22:57 CDT)
+
+Ran the full live procedure on the live chart. **Two wins, one hard
+failure that must be fixed before this ships.**
+
+## WORKS (verified live)
+
+- `*` disclosure: on 5M every profile-derived label carried it —
+  `VAH 4432.4*`, `PREV POC 4407.9*`, `dVAH 4398.7*`, `dVAL 4377.0*`,
+  `VAL 4352.5*`, `ACCUM 4375.7*`, `HTF VAH 4304.6*` — with the CAUTION
+  line explaining the mark. Evidence honesty shipped correctly.
+- Session anchoring at 5M was EXACT: `sp@1274w235,1550w235,1826w235,
+  2102w235,2378w235,2654w235`. Anchor spacing 276 slots x 5 min = 1380
+  min = 23h = one session, and w235 x 5 = ~19.6h ~= 85% of a session.
+  Slot arithmetic scales with barMin as designed.
+- The reset fired on the 1M->5M switch (HTF composite populated from the
+  deeper 5M history, levels re-derived).
+- Recovery: F5 restores a correct chart (`tf=MinuteBar/1 barMin=1
+  anchor=ok@2644 i=3001 ... emit accB@121 accL@121 sp@0w1074,1264w1173`),
+  profile on its own candles.
+
+## HARD FAILURE — infinite reset loop on the 5M -> 1M switch
+
+Switching BACK to 1M leaves the indicator permanently dead. Diag, stable
+for 60+ seconds on a chart titled `MGCZ6 1m`:
+
+```
+tf=MinuteBar/5  barMin=5  anchor=ok@0  i=3  base=0  mirror=3
+gap=0 desync=0  emit accB@- accL@- sp@-   [timeframe changed - reloading]
+CAUTION: 5-min bars - grades measured on 1-min; * marks 5-min-bin levels
+```
+
+**Root cause (mechanism, not hypothesis):** `chartDescription` is STALE —
+it still reports `MinuteBar/5` after the chart switched to 1-minute
+(exactly the platform quirk section 1.2 warned about). So on re-init
+`barMin` is re-read as 5 on a 1-minute chart. Now the data-side detector
+`finer = dMs - lastPushedMs < this.barMin * 60e3` compares 1-minute bar
+spacing (60,000 ms) against a stale 5-minute period (300,000 ms) — TRUE
+on **every incoming bar** — so `init()` runs on every bar, the mirror is
+wiped before it can grow (`i=3 mirror=3`, never advancing), every layer
+is suppressed, and the reloading banner never clears. **The detector that
+was meant to catch the switch instead traps the indicator in a loop, and
+only F5 recovers it.**
+
+Severity: high. The trader toggles constantly; going *down* in timeframe
+(the common direction, e.g. 30M -> 1M to enter) is exactly the failing
+one, and the chart stays dead with no signals until a manual refresh.
+
+**Fix direction:** the new period must be DERIVED FROM THE DATA, never
+re-read from the stale `chartDescription` during a reset. On detecting
+`finer`, set `barMin` from the OBSERVED spacing (e.g. the median of the
+last N inter-bar deltas, or simply `dMs - lastPushedMs` rounded to
+minutes) and only then re-init. Also make the reset idempotent: refuse to
+re-init more than once per K bars, and clear `[timeframe changed -
+reloading]` only once the mirror exceeds a minimum length — a permanent
+reloading banner should itself be a detectable error state (e.g. escalate
+to `[reset loop - press F5]` after N consecutive resets, so the trader is
+told the remedy instead of staring at a dead chart).
+
+## Also worth addressing (cosmetic, lower priority)
+
+At 5M with a ~12-day viewport, the six session profiles (each ~85% of a
+session wide) tile into a near-continuous olive/slate wall across the
+left of the chart, obscuring price. MP_55396 avoids this in practice
+because a trader views 1-3 sessions at that resolution. Consider scaling
+profile width down as the count of VISIBLE sessions rises, or capping
+total profile coverage to a fraction of the viewport.
+
+## Not yet tested
+
+15M and 30M were not reached — the 1M return path failed first and the
+chart was restored for trading. Re-run the full four-way toggle after the
+loop fix.
