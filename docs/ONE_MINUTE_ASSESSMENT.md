@@ -209,3 +209,35 @@ queued for a quiet moment.
 
 Account: position 0, equity 98,919.41 unchanged. Chart restored to 1M at
 the live edge.
+
+---
+
+# section 11 — v10.2 EMPHASIS TABLE LIVE (2026-08-10 14:20 CDT, 1M)
+
+Deployed. On 1M the chart is markedly quieter: price action fully
+unobstructed through the rally to 4442, historical session blocks well
+recessed, all levels crisp (PREV POC 4407.9, dVAH 4411.6, dPOC 4394.8,
+dVAL 4381.5, VAH 4432.4, `HTF: n/a - 2/5 sessions loadable here`,
+`[t-du]`). The per-family emphasis mechanism works as specified.
+
+**Calibration note (trader's eye required):** at the shipped defaults the
+result may be slightly TOO recessive on 1M — historical sessions at
+effective 10 read very faint. Not a defect; the numbers were explicitly
+shipped as starting points. Candidate tweak if the trader agrees:
+session 0.5 -> 0.6, htf 0.4 -> 0.5, leaving dev at 1.0. Await his read
+before changing anything.
+
+**5M patchwork acceptance NOT run.** Deliberate: gold was in a live rally
+(+22.4, 0.51%) with the trader on his execution timeframe, and the
+acceptance requires switching away from it. Queued with the other
+trader-side readings rather than forced during a moving market.
+
+## Remaining queue (all trader-side, none blocking)
+
+1. Deliberate human pan at 5M — perceived smoothness (the honest limit
+   section 10 stated on screenshot-based verification).
+2. 5M frame for the emphasis/patchwork acceptance + any per-family tweak.
+3. Coarse-timeframe `hpro@/apro@/accB@` telemetry capture.
+4. 30M label-stack cross-cluster acceptance.
+
+Account: position 0, equity 98,919.41 unchanged across 15 deployments.
