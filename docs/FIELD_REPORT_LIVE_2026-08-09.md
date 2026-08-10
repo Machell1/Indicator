@@ -257,3 +257,38 @@ including gaps? clamped?). Once mapped, either du positions get a
 transform before emission, or -- if the mapping is per-minute-with-gaps --
 anchors should be emitted as (timestamp-derived minute offsets) instead
 of bar indexes. Do not guess: probe first, transform second.
+
+---
+
+## 10. v7.2 CALIBRATION RESULT (probe run 21:41 CDT) -- du IS MINUTE-SLOTS, NOT BAR INDEXES
+
+Probe frame, viewport = [Sun ~17:00 .. Mon ~11:39] (scrolled to latest,
+live bar at ~21:42, i ~= 3002, banner shows CALIB ACTIVE + [du]):
+
+- **Exactly ONE magenta probe in frame: `du 1002 (i-2000)` rendering at
+  ~09:39 MONDAY MORNING in the future grid** -- ~12 hours right of the
+  live candle. A Thursday bar's index renders half a day into the future.
+- All nearer probes (`du=i`, `i-100`, `i-500`, `i-1000`) are OFF-SCREEN
+  RIGHT -- consistent only with larger du => further right on a
+  minute-per-slot axis (du=i ~= minute 3002 ~= Tuesday).
+- The visible axis is UNIFORM ~1 px/minute across live candles AND the
+  pre-gridded future alike.
+
+**Measured platform fact: on a live chart, `du(n)` addresses the n-th
+MINUTE-SLOT of the chart's laid-out time axis (weekend gap compressed,
+future session pre-gridded) -- NOT the n-th bar of the data array.**
+Decision-table row 1, in its strongest form. Pre-open the two spaces
+coincided (no live template laid out), which is why everything aligned
+on Saturday and diverged at the Sunday open. Every displacement in
+sections 1-9 is this one fact.
+
+**The transform (next PR):** emit x-coordinates as minute-offsets derived
+from timestamps: x_du = (bar_timestamp - layout_origin_ts) / 60000, with
+layout_origin calibratable live (the du=i probe vs the white live-close
+reference gives the origin in one frame; origin candidates: first loaded
+bar's timestamp vs current session template start -- the probe frame
+suggests the layout origin is near the SUNDAY session start since minute
+1002 ~= Mon 09:42 from Sun 17:00). Keep the probe: re-verify the
+transform with the same labeled lines before/after, per your discipline.
+Note the mirror/anchors stay bar-index internally (all engine + guard
+logic is index-true); ONLY the final du() emission transforms.
