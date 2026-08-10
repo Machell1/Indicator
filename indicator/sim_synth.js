@@ -1350,6 +1350,149 @@ if (aln.length) {
   console.log('part16 reset-loop fix:      derive-from-data, single reset, revive, escalate OK');
 }
 
+// -- part 17: gauge row widths + the 30M slab class (spec section 7).
+// Histogram row widths are visual gauges: in minute-slot mode they must
+// equal their raw bar-count width even when the row's index span crosses
+// the weekend gap (v8's endpoint transform stretched them into multi-day
+// slabs). Session median/bracket/key-values hug the rows; telemetry
+// names hpro/apro; the oversize guard prunes runaway rects; per-profile
+// key values drop at multi-session density; coarse label pitch widens. --
+{
+  // 17a: weekend-gap frame in slot mode -- every rect's slot width must
+  // equal a legal gauge width (bounded by its family cap)
+  const SESS = 1380, LIVE = 200;
+  const thuFri = bars.slice(0, 2 * SESS);
+  const gapMs = 49 * 3600e3 - (bars[2 * SESS].tMs - bars[2 * SESS - 1].tMs);
+  const sunday = bars.slice(2 * SESS, 2 * SESS + LIVE)
+    .map(b => Object.assign({}, b, { tMs: b.tMs + gapMs }));
+  const all17 = thuFri.concat(sunday);
+  const inst = new Calc();
+  inst.props = { htfSessions: 20, duTime: '1', diag: 1 };
+  inst.contractInfo = { tickSize: 0.1 };
+  inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  inst.init();
+  const ents17 = all17.map((b, j, arr) => entity(b, j === arr.length - 1, true));
+  let res17 = null;
+  for (let j = 0; j < ents17.length; j++)
+    res17 = inst.map(ents17[j], j, makeHistory(ents17.slice(0, j + 1)));
+  // fabricate an ACCUM window whose row span crosses the weekend gap
+  const iaTs = inst.tmsList[2 * SESS - 10];       // 10 bars before the gap
+  inst.lastOut.accum = { level: inst.lastOut.prev.poc + 1, short: false,
+    start: iaTs, end: inst.tmsList[2 * SESS + 60],
+    winHi: inst.lastOut.prev.poc + 2, winLo: inst.lastOut.prev.poc - 1,
+    rows: [{ price: inst.lastOut.prev.poc, frac: 1, inVA: true, isPoc: true, h: 0.5 }] };
+  const it17 = inst.buildItems(ents17[ents17.length - 1], all17.length - 1, null);
+  const capOf = k17 =>
+    k17.startsWith('apro') ? inst.wAcc :
+    k17.startsWith('hpro') ? inst.wHtf :
+    k17.startsWith('dpro') || k17.startsWith('ppro') ? inst.wPrev : 1500;
+  let checked17 = 0;
+  for (const it of it17) {
+    if (it.tag !== 'Shapes') continue;
+    for (const pr of it.primitives) {
+      if (pr.size.width.unit !== 'du') continue;
+      check(pr.size.width.v <= Math.max(capOf(it.key), 1173) + 1e-9,
+        `part17a: gauge row wider than its cap: ${it.key} w=${pr.size.width.v}`);
+      checked17++;
+    }
+  }
+  check(checked17 > 0, 'part17a: no du rects checked');
+  // the ACCUM histogram row crossing the gap must be EXACTLY its bar
+  // width in slots (the v8 endpoint transform would have added ~2940)
+  const apro17 = it17.find(x => x.key.startsWith('apro'));
+  check(!!apro17, 'part17a: ACCUM histogram missing');
+  if (apro17)
+    check(apro17.primitives[0].size.width.v <= inst.wAcc,
+      'part17a: THE SLAB -- gap minutes leaked into a row width: ' +
+      apro17.primitives[0].size.width.v);
+  // telemetry present
+  const s417 = it17.find(x => x.key === 'stat4');
+  // hpro reads "-" here legitimately (two sessions < the HTF minimum of
+  // five); the field's presence + apro/accB's populated formats prove
+  // the telemetry
+  check(s417 && / hpro@/.test(s417.text) && / apro@\d+w\d+/.test(s417.text) &&
+    / accB@\d+-\d+/.test(s417.text),
+    'part17a: hpro/apro/accB telemetry missing: ' + (s417 ? s417.text : '-'));
+  // median/bracket hug the rows: bracket horiz width == median width ==
+  // wS raw slots (no gap stretching)
+  const prev17 = inst.core.sessions[inst.core.sessions.length - 1];
+  const med17 = it17.find(x => x.key === 'sp' + prev17.startTms + 'M');
+  if (med17) {
+    const wMed = med17.lines[0].b.x.v - med17.lines[0].a.x.v;
+    check(wMed <= Math.round(prev17.bars.length * 0.85) + 1e-9,
+      'part17a: median stretched past the rows: ' + wMed);
+  }
+
+  // 17b: oversize guard -- a runaway rect (fake 3000-bar session) is
+  // pruned and named
+  const fakeTs = inst.tmsList[100];
+  const fakeBars = [];
+  for (let j = 0; j < 2600; j++)
+    fakeBars.push({ tMs: inst.tmsList[100 + j], o: 100.2, c: 100.2,
+      h: 100.4, l: 100.0, vol: 40, delta: 0 });
+  inst.core.sessions.push({ key: 'HUGE', bars: fakeBars, startTms: fakeTs, rows: null });
+  const it17b = inst.buildItems(ents17[ents17.length - 1], all17.length - 1, null);
+  const s317b = it17b.find(x => x.key === 'stat3');
+  check(it17b.every(x => !(x.tag === 'Shapes' && x.key.startsWith('sp' + fakeTs + 'C'))),
+    'part17b: oversize rows not pruned');
+  check(s317b && s317b.text.indexOf('[oversize item:') >= 0,
+    'part17b: oversize marker missing');
+  inst.core.sessions.pop();
+
+  // 17c: label rules -- per-profile key values dropped at 30M density,
+  // global pitch widened so far-apart-in-price labels cluster on a
+  // weeks-wide view
+  const agg17 = (src, k) => {
+    const m = new Map();
+    for (const b of src) {
+      const slot = Math.floor(b.tMs / (k * 60e3)) * k * 60e3;
+      let e = m.get(slot);
+      if (!e) { e = { tMs: slot, o: b.o, h: b.h, l: b.l, c: b.c, vol: 0, offv: 0, bidv: 0 }; m.set(slot, e); }
+      if (b.h > e.h) e.h = b.h;
+      if (b.l < e.l) e.l = b.l;
+      e.c = b.c; e.vol += b.vol; e.offv += b.offv; e.bidv += b.bidv;
+    }
+    return [...m.values()].sort((a, b) => a.tMs - b.tMs);
+  };
+  const inst30 = new Calc();
+  inst30.props = { htfSessions: 20 };
+  inst30.contractInfo = { tickSize: 0.1 };
+  inst30.chartDescription = { underlyingType: 'MinuteBar', elementSize: 30 };
+  inst30.init();
+  const ents30 = agg17(bars.slice(0, 4 * SESS + 600), 30).map((b, j, arr) =>
+    entity(b, j === arr.length - 1, true));
+  let res30 = null;
+  for (let j = 0; j < ents30.length; j++)
+    res30 = inst30.map(ents30[j], j, makeHistory(ents30.slice(0, j + 1)));
+  const it30 = res30.graphics.items;
+  check(it30.some(x => x.tag === 'Shapes' && /^sp\d+C\d+$/.test(x.key)),
+    'part17c: no session profiles at 30M');
+  check(it30.every(x => !/^sp\d+T[HPL]$/.test(x.key)),
+    'part17c: per-profile key values still drawn at 30M density');
+  // 1M keeps them (part 11 asserts presence; re-check here on a 1M run)
+  const R17 = runModel('A', 400);
+  check(R17.lastResult.graphics.items.some(x => /^sp\d+TP$/.test(x.key)),
+    'part17c: key values missing at 1M');
+  // coarse pitch: two global labels ~17pts apart must share a cluster at 30M
+  const out30 = inst30.lastOut;
+  out30.leg = { level: out30.prev.poc + 17, down: false };
+  out30.nakedPocs = [{ poc: out30.prev.poc + 0.5,
+    endTms: inst30.tmsList[inst30.tmsList.length - 300] }];
+  const it30b = inst30.buildItems(ents30[ents30.length - 1], ents30.length - 1, null);
+  // the coarse pitch needs the HTF composite; fabricate one if the short
+  // aggregated run has fewer than 5 sessions (the wrapper guards on it)
+  if (!out30.htf)
+    out30.htf = { poc: out30.prev.poc, vah: out30.prev.poc + 150,
+      val: out30.prev.poc - 150, sessions: 5 };
+  const it30c = inst30.buildItems(ents30[ents30.length - 1], ents30.length - 1, null);
+  const legT = it30c.find(x => x.key === 'legT');
+  const spanHtf = (out30.htf.vah - out30.htf.val) * 0.08;
+  check(!!legT && spanHtf > 17, 'part17c: coarse-pitch fixture invalid');
+  if (legT && spanHtf > 17)
+    check(legT.point.y.unit === 'op', 'part17c: coarse labels not fanned at 30M');
+  console.log('part17 gauge widths:        slab class dead, telemetry, oversize, labels OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

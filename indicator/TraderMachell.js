@@ -953,10 +953,12 @@ function vline(key, x, pLo, pHi, color, dash) {
     lineStyle: { lineWidth: 1, color, lineStyle: dash || 3 },
   };
 }
-function txt(key, x, price, s, color, dyPx, font, align) {
+// rawX: the x is ALREADY in slot space (gauge-space callers transform
+// once themselves); otherwise x is a bar index and goes through duX.
+function txt(key, x, price, s, color, dyPx, font, align, rawX) {
   return {
     tag: "Text", key, global: true,
-    point: { x: duX(x), y: dyPx ? op(du(price), "-", px(dyPx)) : du(price) },
+    point: { x: rawX ? du(x) : duX(x), y: dyPx ? op(du(price), "-", px(dyPx)) : du(price) },
     text: s,
     style: Object.assign({ fill: color }, font || FONT),
     // rightMiddle extends text to the RIGHT of the anchor (into the empty
@@ -975,13 +977,17 @@ function frameTxt(key, xPx, yPx, s, color, font) {
   };
 }
 // the ONLY places a Rectangle's y anchor is decided. pLo/pHi are prices.
-// vrect widths are transformed by ENDPOINTS (T(x+w) - T(x)) so a span
-// stays exact even when it crosses a session-halt gap in minute-space.
-function vrect(x, wDu, pLo, pHi) {
-  const xT = DU_T(x);
+// GAUGE SEMANTICS (spec section 7, the 30M slab): a histogram row's width
+// is a VISUAL magnitude (volume gauge), never a time span -- it is
+// emitted as a raw slot count from a PRE-transformed anchor. v8's
+// endpoint transform (T(x+w) - T(x)) stretched any row whose index span
+// crossed a weekend/overnight gap by the gap's wall-clock minutes: at
+// 30M a 20-bar row became a multi-day slab. slotRect takes an anchor
+// ALREADY in slot space (callers apply DU_T once) and a raw width.
+function slotRect(xSlot, wSlots, pLo, pHi) {
   return { tag: "Rectangle",
-    position: { x: du(xT), y: du(RECT_Y_ANCHOR === "bottom" ? pLo : pHi) },
-    size: { width: du(DU_T(x + wDu) - xT), height: du(pHi - pLo) } };
+    position: { x: du(xSlot), y: du(RECT_Y_ANCHOR === "bottom" ? pLo : pHi) },
+    size: { width: du(wSlots), height: du(pHi - pLo) } };
 }
 function pxrect(x, wPx, pLo, pHi) {
   return { tag: "Rectangle",
@@ -1001,6 +1007,9 @@ function pxrect(x, wPx, pLo, pHi) {
 //                 must skip in px mode.
 function histogram(keyBase, rows, x0, dir, colorMain, colorVA, colorPoc, maxW, duMode) {
   const groups = { main: [], va: [], poc: [] };
+  // the anchor is transformed ONCE; row widths are raw slot counts
+  // (gauge semantics -- see slotRect)
+  const sx = DU_T(x0);
   for (const r of rows) {
     if (!(r.frac > 0)) continue;          // no phantom stubs on gap rows
     const h = (r.h || 0) * VIS.rowFill;
@@ -1009,7 +1018,7 @@ function histogram(keyBase, rows, x0, dir, colorMain, colorVA, colorPoc, maxW, d
     let rect;
     if (duMode) {
       const w = Math.max(VIS.minRowBars, r.frac * maxW);
-      rect = vrect(dir > 0 ? x0 : x0 - w, w, pLo, pHi);
+      rect = slotRect(dir > 0 ? sx : sx - w, w, pLo, pHi);
     } else {
       if (dir < 0) continue;              // negative px widths are unproven
       rect = pxrect(x0, Math.max(VIS.minRowPx, Math.round(r.frac * maxW)), pLo, pHi);
@@ -1044,8 +1053,8 @@ function box(key, xA, xB, hi, lo, color, dash) {
 // Labels whose prices sit within clusterATR of each other form a stack
 // fanned around the cluster midpoint at a fixed pixel pitch, ordered by
 // price -- close levels can never overprint each other, at any zoom.
-function layoutLabels(labels, lx, atr) {
-  const eps = Math.max(atr * VIS.clusterATR, 1e-9);
+function layoutLabels(labels, lx, atr, rawX, epsOverride) {
+  const eps = Math.max(epsOverride || 0, atr * VIS.clusterATR, 1e-9);
   const sorted = labels.slice().sort((a, b) => b.price - a.price);
   const items = [];
   let c = 0;
@@ -1058,7 +1067,8 @@ function layoutLabels(labels, lx, atr) {
     for (let k = 0; k < n; k++) {
       const dy = ((n - 1) / 2 - k) * VIS.labelGapPx;  // +dy raises the label
       const L = cluster[k];
-      items.push(txt(L.key, lx, n > 1 ? mid : L.price, L.text, L.color, dy, L.font));
+      items.push(txt(L.key, lx, n > 1 ? mid : L.price, L.text, L.color, dy, L.font,
+        undefined, rawX));
     }
     c = e + 1;
   }
@@ -1599,7 +1609,7 @@ class traderMachell {
     // anywhere IN RANGE, which the overshoot guard cannot see.
     const mism = new Set();
     let offscreen = false;
-    const emits = { accB: "-", accL: "-", sp: "-" };  // construction-time telemetry
+    const emits = { accB: "-", accL: "-", sp: "-", hpro: "-", apro: "-" };
     const futureKeys = new Set();   // filled by guards below + the final scan
     const idx = (t, layer) => {
       const r = this._idxOf(t, endIdx, tcache);
@@ -1677,9 +1687,10 @@ class traderMachell {
       // cap the mirror's max width at x0 so no row's left edge lands on a
       // negative du x (unproven coordinate region; shape is preserved --
       // rows scale proportionally to the cap)
+      const wH = Math.min(this.wHtf, x0);
+      emits.hpro = x0 + "w" + wH;
       items.push(...histogram("hpro", out.htfRows, x0, -1,
-        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow,
-        Math.min(this.wHtf, x0), true));
+        COLORS.htfGhost, COLORS.htfGhost, COLORS.htfPocRow, wH, true));
     }
 
     // ---- per-session profiles: the MP_55396 look (docs/MP55396_CLONE_
@@ -1726,6 +1737,13 @@ class traderMachell {
         }
         spEmit.push(six + "w" + wS);
         const K = "sp" + sess.startTms;
+        // GAUGE SPACE (section 7): the anchor transforms once; the
+        // profile's visual extent is [sx, sx + wS] in raw slots. The
+        // median, bracket, ray anchor and key values all use the SAME
+        // extent so they hug the rows exactly -- endpoint-transforming
+        // them would stretch past the rows across halts/weekends.
+        const sx = DU_T(six);
+        const sRight = sx + wS;
         // rows, batched into one Shapes item per ramp bucket
         const buckets = [];
         for (const r of mp.rows) {
@@ -1735,7 +1753,7 @@ class traderMachell {
           const bkt = rampBucket(r.t);
           if (!buckets[bkt]) buckets[bkt] = [];
           buckets[bkt].push(duMode
-            ? vrect(six, Math.max(VIS.minRowBars, r.frac * wS), pLo, pHi)
+            ? slotRect(sx, Math.max(VIS.minRowBars, r.frac * wS), pLo, pHi)
             : pxrect(six, Math.max(VIS.minRowPx, Math.round(r.frac * wS)), pLo, pHi));
         }
         for (let bkt = 0; bkt < MP_RAMP_STEPS; bkt++)
@@ -1746,7 +1764,7 @@ class traderMachell {
         // median line across the profile width; prominent = thick yellow
         items.push({ tag: "LineSegments", key: K + "M", global: true,
           lines: [{ tag: "Line",
-            a: { x: duX(six), y: du(mp.poc) }, b: { x: duX(six + wS), y: du(mp.poc) } }],
+            a: { x: du(sx), y: du(mp.poc) }, b: { x: du(sRight), y: du(mp.poc) } }],
           lineStyle: mp.prominent
             ? { lineWidth: 4, color: "#FFFF00", lineStyle: 1 }
             : { lineWidth: 1, color: "#FFFFFF", lineStyle: 1 } });
@@ -1759,22 +1777,29 @@ class traderMachell {
           (out.prev && mp.poc === out.prev.poc) ||
           (out.nakedPocs && out.nakedPocs.some(np => np.poc === mp.poc));
         if (!owned)
-          items.push(ray(K + "R", six + wS, mp.poc, "#FFFFFF", 1, 3));
+          items.push({ tag: "LineSegments", key: K + "R", global: true,
+            lines: [{ tag: "Line", a: { x: du(sRight), y: du(mp.poc) },
+              b: { x: du(sRight + 1), y: du(mp.poc) }, infiniteEnd: true }],
+            lineStyle: { lineWidth: 1, color: "#FFFFFF", lineStyle: 3 } });
         // VA bracket: VAH/VAL spans + vertical connectors at both edges
         items.push({ tag: "LineSegments", key: K + "B", global: true,
           lines: [
-            { tag: "Line", a: { x: duX(six), y: du(mp.vah) }, b: { x: duX(six + wS), y: du(mp.vah) } },
-            { tag: "Line", a: { x: duX(six), y: du(mp.val) }, b: { x: duX(six + wS), y: du(mp.val) } },
-            { tag: "Line", a: { x: duX(six), y: du(mp.vah) }, b: { x: duX(six), y: du(mp.val) } },
-            { tag: "Line", a: { x: duX(six + wS), y: du(mp.vah) }, b: { x: duX(six + wS), y: du(mp.val) } },
+            { tag: "Line", a: { x: du(sx), y: du(mp.vah) }, b: { x: du(sRight), y: du(mp.vah) } },
+            { tag: "Line", a: { x: du(sx), y: du(mp.val) }, b: { x: du(sRight), y: du(mp.val) } },
+            { tag: "Line", a: { x: du(sx), y: du(mp.vah) }, b: { x: du(sx), y: du(mp.val) } },
+            { tag: "Line", a: { x: du(sRight), y: du(mp.vah) }, b: { x: du(sRight), y: du(mp.val) } },
           ],
           lineStyle: { lineWidth: 1, color: "#FFFFFF", lineStyle: 1 } });
-        // key values at the profile's right edge (fanned per session)
-        items.push(...layoutLabels([
-          { key: K + "TH", price: mp.vah, text: "VAH " + fmtL(mp.vah), color: "#FFFFFF", font: FONT_XS },
-          { key: K + "TP", price: mp.poc, text: "POC " + fmtL(mp.poc), color: "#FFFFFF", font: FONT_XS },
-          { key: K + "TL", price: mp.val, text: "VAL " + fmtL(mp.val), color: "#FFFFFF", font: FONT_XS },
-        ], six + wS + 2, out.atr || 0));
+        // key values at the profile's right edge (fanned per session) --
+        // DROPPED at multi-session density (section 7 label collisions):
+        // when sessions are shorter than ~150 bars (15M/30M), adjacent
+        // stacks overprint; the right-edge column still carries levels
+        if (sess.bars.length >= 150)
+          items.push(...layoutLabels([
+            { key: K + "TH", price: mp.vah, text: "VAH " + fmtL(mp.vah), color: "#FFFFFF", font: FONT_XS },
+            { key: K + "TP", price: mp.poc, text: "POC " + fmtL(mp.poc), color: "#FFFFFF", font: FONT_XS },
+            { key: K + "TL", price: mp.val, text: "VAL " + fmtL(mp.val), color: "#FFFFFF", font: FONT_XS },
+          ], sRight + 2, out.atr || 0, true));
       }
       // full per-session telemetry (field report section 8: the culprit
       // must self-identify): anchor+width per rendered session, "pre" =
@@ -1813,6 +1838,7 @@ class traderMachell {
       const mpPrev = prevSess ? this._mpSession(prevSess) : null;
       const wP = duMode ? capW(this.wPrev) : VIS.prevMaxPx;
       if (mpPrev) {
+        const px0 = DU_T(x0);
         const buckets = [];
         for (const r of mpPrev.rows) {
           if (!(r.frac > 0) || !(r.h > 0)) continue;
@@ -1820,7 +1846,7 @@ class traderMachell {
           const bkt = rampBucket(r.t);
           if (!buckets[bkt]) buckets[bkt] = [];
           buckets[bkt].push(duMode
-            ? vrect(x0, Math.max(VIS.minRowBars, r.frac * wP), r.price - h / 2, r.price + h / 2)
+            ? slotRect(px0, Math.max(VIS.minRowBars, r.frac * wP), r.price - h / 2, r.price + h / 2)
             : pxrect(x0, Math.max(VIS.minRowPx, Math.round(r.frac * wP)), r.price - h / 2, r.price + h / 2));
         }
         for (let bkt = 0; bkt < MP_RAMP_STEPS; bkt++)
@@ -1896,14 +1922,16 @@ class traderMachell {
       // 10-bar minimum growing PAST the anchor), and the histogram may
       // not cross the live edge when the window ends near it.
       if (ia !== undefined && ib !== undefined && ib > ia && out.accum.winHi) {
-        emits.accB = ia;
+        emits.accB = ia + "-" + ib;
         items.push(box("accB", ia, ib, out.accum.winHi, out.accum.winLo, COLORS.accum));
         if (out.accum.rows) {
           let wCap = duMode ? Math.min(this.wAcc, Math.max(10, ib - ia)) : VIS.accMaxPx;
           if (duMode) wCap = Math.min(wCap, i - 12 - ia);
-          if (!duMode || wCap >= 8)
+          if (!duMode || wCap >= 8) {
+            emits.apro = ia + "w" + wCap;
             items.push(...histogram("apro", out.accum.rows, ia, 1,
               COLORS.accHist, COLORS.accHist, COLORS.accPocRow, wCap, duMode));
+          }
         }
       }
       // NEVER pin the ACCUM level at x0 when its window predates loaded
@@ -1998,7 +2026,8 @@ class traderMachell {
       const h = out.prevProf[0].h || 0.5;
       const pLo = out.prev.poc - h / 2, pHi = out.prev.poc + h / 2;
       items.push({ tag: "Shapes", key: "alnR", global: true,
-        primitives: [duMode ? vrect(x0, Math.max(10, Math.round((i - x0) / 3)), pLo, pHi)
+        primitives: [duMode
+          ? slotRect(DU_T(x0), Math.max(10, Math.round((i - x0) / 3)), pLo, pHi)
           : pxrect(x0, 80, pLo, pHi)],
         fillStyle: { color: COLORS.test } });
       items.push(frameTxt("alnT", 70, O.diag ? 90 : 72,
@@ -2007,7 +2036,12 @@ class traderMachell {
     }
 
     // ---- right-edge labels, de-collided ----
-    items.push(...layoutLabels(labels, lx, out.atr || 0));
+    // At coarse timeframes the viewport shows weeks, so labels many
+    // points apart still overlap on screen: widen the cluster pitch with
+    // an HTF-span term (section 7's ACCUM/NPOC collision at 30M).
+    const coarseEps = (this.barMin >= 15 && out.htf)
+      ? (out.htf.vah - out.htf.val) * 0.08 : 0;
+    items.push(...layoutLabels(labels, lx, out.atr || 0, false, coarseEps));
 
     // ---- emitted-geometry invariant (field report section 6) ----
     // Final guard on the GEOMETRY ACTUALLY EMITTED, independent of where
@@ -2018,9 +2052,15 @@ class traderMachell {
     // NAMED on the banner instead of painting the future grid. Text is
     // exempt (the label column at i+4 is the designed exception).
     const xCap = i + 2;
+    // MAX_ROW_SLOTS (spec section 7): no filled rect is ever legitimately
+    // wider than a full 1-minute session's fill (~1,173 slots) plus
+    // margin -- the 30M slab class (a gauge row stretched across a
+    // weekend by a unit mixup) is caught here whatever produces it.
+    const MAX_ROW_SLOTS = 1500;
+    const oversize = new Set();
     for (let n2 = items.length - 1; n2 >= 0; n2--) {
       const it = items[n2];
-      let bad = false;
+      let bad = false, tooWide = false;
       if (it.tag === "Shapes") {
         for (const pr of it.primitives) {
           const x = pr.position.x;
@@ -2028,17 +2068,22 @@ class traderMachell {
           if (x.v > xCap ||
               (pr.size.width.unit === "du" && x.v + pr.size.width.v > xCap))
             bad = true;
+          if (pr.size.width.unit === "du" && pr.size.width.v > MAX_ROW_SLOTS)
+            tooWide = true;
         }
       } else if (it.tag === "LineSegments") {
         for (const ln of it.lines)
           for (const p2 of [ln.a, ln.b])
             if (p2.x.unit === "du" && p2.x.v > xCap) bad = true;
       }
-      if (bad) {
-        futureKeys.add(it.key);
+      if (bad || tooWide) {
+        if (tooWide) oversize.add(it.key);
+        else futureKeys.add(it.key);
         items.splice(n2, 1);
       }
     }
+    if (oversize.size) this._oversizeKeys = [...oversize].sort();
+    else this._oversizeKeys = null;
 
     // ---- du-axis calibration probe (field report section 9) ----
     // Construction-truth telemetry proved every emitted structure sits at
@@ -2121,6 +2166,8 @@ class traderMachell {
     if (mism.size) ctx.push("[anchor mismatch: " + [...mism].sort().join(",") + "]");
     if (futureKeys.size)
       ctx.push("[future-grid item: " + [...futureKeys].sort().join(",") + "]");
+    if (this._oversizeKeys)
+      ctx.push("[oversize item: " + this._oversizeKeys.join(",") + "]");
     if (offscreen) ctx.push("[old anchors offscreen - load more bars]");
     if (this._desync) ctx.push("[mirror desync]");
     if (O.calib) ctx.push("CALIB ACTIVE - each magenta line must stand on its bar");
@@ -2174,6 +2221,7 @@ class traderMachell {
         " desync=" + (this._desync ? 1 : 0) +
         (out.accum ? " acc=" + age(out.accum.start) + ".." + age(out.accum.end) : "") +
         " emit accB@" + emits.accB + " accL@" + emits.accL + " sp@" + emits.sp +
+        " hpro@" + emits.hpro + " apro@" + emits.apro +
         (tMode ? " tdu origin=" + originTs + "+" + O.originShift + "m" : "") +
         "   props: " + dump,
         COLORS.dim, FONT_SM));
