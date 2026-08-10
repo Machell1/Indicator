@@ -1,7 +1,7 @@
 /*
  * TraderMachell -- Tradovate custom indicator
  * Dale volume-profile model with backtest-earned evidence tags.
- * Generated 2026-08-09 by build.js -- do not edit by hand;
+ * Generated 2026-08-10 by build.js -- do not edit by hand;
  * edit dale_core.js / wrapper.js and rebuild.
  *
  * Core math is regression-verified: identical POC/VAH/VAL to the Python
@@ -882,6 +882,26 @@ const COLORS = {
 };
 const FONT = { fontSize: 13, fontWeight: "bold" };
 const FONT_SM = { fontSize: 11, fontWeight: "bold" };
+const FONT_XS = { fontSize: 10, fontWeight: "normal" };
+
+// ---- MP-look time ramp (docs/MP55396_CLONE_SPEC.md section 2) ----------
+// Row color encodes WHEN the row's volume traded within its session:
+// session open = pure blue -> session close = pure red, interpolated as a
+// pure R/B mix (G stays 00) so the at-a-glance reading matches the
+// trader's MT5 Market Profile. Colors are bucketed into MP_RAMP_STEPS
+// discrete stops so rows batch into few Shapes items (platform budget).
+const MP_RAMP_STEPS = 10;
+const MP_SPAN_FILL = 0.85;   // max row width as a fraction of the session's bar span
+const MP_PROMINENT = 0.8;    // POC-row bar coverage for a "prominent median"
+function rampColor(t) {
+  const T = Math.max(0, Math.min(1, t));
+  const r = Math.round(255 * T), b = 255 - r;
+  const hex = v => (v < 16 ? "0" : "") + v.toString(16).toUpperCase();
+  return "#" + hex(r) + "00" + hex(b);
+}
+function rampBucket(t) {
+  return Math.max(0, Math.min(MP_RAMP_STEPS - 1, Math.floor(t * MP_RAMP_STEPS)));
+}
 
 // ---- defensive prop coercion (bool prop VALUES observed undelivered
 // live 2026-08-09; never trust platform prop types) -----------------------
@@ -1142,6 +1162,87 @@ class traderMachell {
     return res;
   }
 
+  // ---- MP-look per-session style pass (display-only, cached forever:
+  // finalized sessions are immutable) ----
+  // Recomputes the session's profile with the engine's own buildProfile
+  // and grid convention, then adds what the engine's display rows don't
+  // carry: per-row volume-weighted MEAN TIME (bar-position fraction of
+  // the session -- drives the Blue->Red ramp), per-row bar coverage (the
+  // POC row's coverage >= MP_PROMINENT of the session's bars = prominent
+  // median, the behavior of the trader's MT5 tool), and VAH/VAL for the
+  // bracket. Engine untouched; values converge with the graded profile
+  // by construction (same math).
+  _mpSession(sess) {
+    if (!this._mp) this._mp = new Map();
+    const hit = this._mp.get(sess.startTms);
+    if (hit !== undefined) return hit;
+    let res = null;
+    const bars = sess.bars;
+    if (bars && bars.length >= 2) {
+      let lo = Infinity, hi = -Infinity, vol = 0;
+      for (const b of bars) {
+        if (b.l < lo) lo = b.l;
+        if (b.h > hi) hi = b.h;
+        vol += b.vol;
+      }
+      const step = Math.max((hi - lo) / this.core.cfg.rows, 1e-9);
+      const prof = vol > 0 ? buildProfile(bars, step) : null;
+      if (prof) {
+        // per-grid-row volume, volume*time and bar-coverage accumulation,
+        // same allocation the engine uses (equal share across the bar's
+        // spanned rows)
+        const acc = new Map();
+        const nB = bars.length;
+        for (let bi = 0; bi < nB; bi++) {
+          const b = bars[bi];
+          const a = floorDiv(b.l - prof.lo, step);
+          const z = floorDiv(b.h - prof.lo, step);
+          const share = z >= a ? b.vol / (z - a + 1) : b.vol;
+          const tf = nB > 1 ? bi / (nB - 1) : 0;
+          for (let k = a; k <= z; k++) {
+            let e = acc.get(k);
+            if (!e) { e = { v: 0, vt: 0, n: 0 }; acc.set(k, e); }
+            e.v += share;
+            e.vt += share * tf;
+            e.n += 1;
+          }
+        }
+        const pocAcc = acc.get(prof.pocRow);
+        const prominent = !!pocAcc && pocAcc.n / nB >= MP_PROMINENT;
+        // group into <=30 display rows exactly like the engine's
+        // displayRows (same grouping, same edge clip), carrying mean time
+        const keys = [...acc.keys()].sort((x, y) => x - y);
+        const kLo = keys[0], kHi = keys[keys.length - 1];
+        const group = Math.max(1, Math.ceil((kHi - kLo + 1) / 30));
+        const rows = [];
+        let vmax = 0;
+        for (let g = kLo; g <= kHi; g += group) {
+          const kEnd = Math.min(g + group - 1, kHi);
+          if (prof.lo + g * step >= hi) continue;
+          let v = 0, vt = 0;
+          for (let k = g; k <= kEnd; k++) {
+            const e = acc.get(k);
+            if (e) { v += e.v; vt += e.vt; }
+          }
+          const price = prof.lo + ((g + kEnd + 1) / 2) * step;
+          rows.push({ price, v, t: v > 0 ? vt / v : 0, h: group * step,
+            inVA: price >= prof.val && price <= prof.vah,
+            isPoc: prof.pocRow >= g && prof.pocRow <= kEnd });
+          if (v > vmax) vmax = v;
+        }
+        if (vmax > 0) {
+          for (const r of rows) { r.frac = r.v / vmax; delete r.v; }
+          res = { rows, poc: prof.poc, vah: prof.vah, val: prof.val,
+            prominent, nBars: nB };
+        }
+      }
+    }
+    this._mp.set(sess.startTms, res);
+    if (this._mp.size > 12)
+      this._mp.delete(this._mp.keys().next().value);
+    return res;
+  }
+
   // ---- developing session profile (SVP layer, display-only) ----
   // Built from the CURRENT session's committed bars with the exact same
   // grid convention _finalizeSession uses (step = range/rows, same
@@ -1352,6 +1453,7 @@ class traderMachell {
     // anywhere IN RANGE, which the overshoot guard cannot see.
     const mism = new Set();
     let offscreen = false;
+    const emits = { accB: "-", accL: "-", sp: "-" };  // construction-time telemetry
     const idx = (t, layer) => {
       const r = this._idxOf(t, endIdx, tcache);
       if (r !== undefined) {
@@ -1426,22 +1528,75 @@ class traderMachell {
         Math.min(this.wHtf, x0), true));
     }
 
-    // ---- per-session profiles (MarketProfile-style: one histogram per
-    // day, anchored at each session's own start -- the MT5 look) ----
-    if (out.sessionProfiles) {
-      for (let s = 0; s < out.sessionProfiles.length; s++) {
-        const sp = out.sessionProfiles[s];
-        const six = idx(sp.start, "sp");
+    // ---- per-session profiles: the MP_55396 look (docs/MP55396_CLONE_
+    // SPEC.md). Per finalized session: Blue->Red time-graded rows filling
+    // the session span, white solid median line (thick YELLOW when the
+    // POC row is prominent), dashed white median ray to the right, white
+    // VA bracket, and key-value text at the profile's edge. Keys carry
+    // the session's own start tms (the A8 stable-key rule); widths keep
+    // the v6.4 live-edge cap.
+    {
+      const sessions = this.core.sessions.slice(-6);
+      for (const sess of sessions) {
+        const six = idx(sess.startTms, "sp");
         if (six === undefined) continue;
-        // keyed by the session's own start tms (not loop position): the
-        // slice window shifts at every 17:00 NY roll and positional keys
-        // would swap identity across all six profiles (the A8 defect class)
-        // (width additionally capped at the live edge, like every other
-        // right-growing histogram -- section-6 audit)
-        const wS = duMode ? Math.min(this.wSess, i - 12 - six) : VIS.sessMaxPx;
+        const mp = this._mpSession(sess);
+        if (!mp) continue;
+        const wS = duMode
+          ? Math.min(Math.round(sess.bars.length * MP_SPAN_FILL), i - 12 - six)
+          : VIS.sessMaxPx;
         if (duMode && wS < 8) continue;
-        items.push(...histogram("sp" + sp.start, sp.rows, six, 1,
-          COLORS.sess, COLORS.sessVA, COLORS.sessPoc, wS, duMode));
+        if (emits.sp === "-") emits.sp = six;
+        const K = "sp" + sess.startTms;
+        // rows, batched into one Shapes item per ramp bucket
+        const buckets = [];
+        for (const r of mp.rows) {
+          if (!(r.frac > 0) || !(r.h > 0)) continue;
+          const h = r.h * VIS.rowFill;
+          const pLo = r.price - h / 2, pHi = r.price + h / 2;
+          const bkt = rampBucket(r.t);
+          if (!buckets[bkt]) buckets[bkt] = [];
+          buckets[bkt].push(duMode
+            ? vrect(six, Math.max(VIS.minRowBars, r.frac * wS), pLo, pHi)
+            : pxrect(six, Math.max(VIS.minRowPx, Math.round(r.frac * wS)), pLo, pHi));
+        }
+        for (let bkt = 0; bkt < MP_RAMP_STEPS; bkt++)
+          if (buckets[bkt])
+            items.push({ tag: "Shapes", key: K + "C" + bkt, global: true,
+              primitives: buckets[bkt],
+              fillStyle: { color: rampColor((bkt + 0.5) / MP_RAMP_STEPS) } });
+        // median line across the profile width; prominent = thick yellow
+        items.push({ tag: "LineSegments", key: K + "M", global: true,
+          lines: [{ tag: "Line",
+            a: { x: du(six), y: du(mp.poc) }, b: { x: du(six + wS), y: du(mp.poc) } }],
+          lineStyle: mp.prominent
+            ? { lineWidth: 4, color: "#FFFF00", lineStyle: 1 }
+            : { lineWidth: 1, color: "#FFFFFF", lineStyle: 1 } });
+        // dashed median ray from the profile's right edge (ShowMedianRays=
+        // All), unless the level is owned by a stronger layer: an untested
+        // naked POC (red, encodes traded-through state the MT5 tool lacks)
+        // or the PREV POC's solid white ray. The median ray takes over
+        // once a naked level is traded through.
+        const owned =
+          (out.prev && mp.poc === out.prev.poc) ||
+          (out.nakedPocs && out.nakedPocs.some(np => np.poc === mp.poc));
+        if (!owned)
+          items.push(ray(K + "R", six + wS, mp.poc, "#FFFFFF", 1, 3));
+        // VA bracket: VAH/VAL spans + vertical connectors at both edges
+        items.push({ tag: "LineSegments", key: K + "B", global: true,
+          lines: [
+            { tag: "Line", a: { x: du(six), y: du(mp.vah) }, b: { x: du(six + wS), y: du(mp.vah) } },
+            { tag: "Line", a: { x: du(six), y: du(mp.val) }, b: { x: du(six + wS), y: du(mp.val) } },
+            { tag: "Line", a: { x: du(six), y: du(mp.vah) }, b: { x: du(six), y: du(mp.val) } },
+            { tag: "Line", a: { x: du(six + wS), y: du(mp.vah) }, b: { x: du(six + wS), y: du(mp.val) } },
+          ],
+          lineStyle: { lineWidth: 1, color: "#FFFFFF", lineStyle: 1 } });
+        // key values at the profile's right edge (fanned per session)
+        items.push(...layoutLabels([
+          { key: K + "TH", price: mp.vah, text: "VAH " + fmt(mp.vah), color: "#FFFFFF", font: FONT_XS },
+          { key: K + "TP", price: mp.poc, text: "POC " + fmt(mp.poc), color: "#FFFFFF", font: FONT_XS },
+          { key: K + "TL", price: mp.val, text: "VAL " + fmt(mp.val), color: "#FFFFFF", font: FONT_XS },
+        ], six + wS + 2, out.atr || 0));
       }
     }
 
@@ -1467,9 +1622,33 @@ class traderMachell {
       items.push(ray("dvalL", rayX0, dev.val, COLORS.dev, 1, 5));
       lab("dvalT", dev.val, "dVAL " + fmt(dev.val), COLORS.dev, FONT_SM);
     } else if (!O.dev && out.prevProf && histOk) {
-      items.push(...histogram("ppro", out.prevProf, x0, 1,
-        COLORS.profile, COLORS.profileVA, COLORS.pocRow,
-        duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
+      // v4-layout projection of the prior session at today's start,
+      // restyled with the same Blue->Red ramp so the chart reads as one
+      // system (spec section 4); falls back to the teal rows if the
+      // session's bars are no longer retained
+      const prevSess = this.core.sessions[this.core.sessions.length - 1];
+      const mpPrev = prevSess ? this._mpSession(prevSess) : null;
+      const wP = duMode ? capW(this.wPrev) : VIS.prevMaxPx;
+      if (mpPrev) {
+        const buckets = [];
+        for (const r of mpPrev.rows) {
+          if (!(r.frac > 0) || !(r.h > 0)) continue;
+          const h = r.h * VIS.rowFill;
+          const bkt = rampBucket(r.t);
+          if (!buckets[bkt]) buckets[bkt] = [];
+          buckets[bkt].push(duMode
+            ? vrect(x0, Math.max(VIS.minRowBars, r.frac * wP), r.price - h / 2, r.price + h / 2)
+            : pxrect(x0, Math.max(VIS.minRowPx, Math.round(r.frac * wP)), r.price - h / 2, r.price + h / 2));
+        }
+        for (let bkt = 0; bkt < MP_RAMP_STEPS; bkt++)
+          if (buckets[bkt])
+            items.push({ tag: "Shapes", key: "pproC" + bkt, global: true,
+              primitives: buckets[bkt],
+              fillStyle: { color: rampColor((bkt + 0.5) / MP_RAMP_STEPS) } });
+      } else {
+        items.push(...histogram("ppro", out.prevProf, x0, 1,
+          COLORS.profile, COLORS.profileVA, COLORS.pocRow, wP, duMode));
+      }
     }
     if (out.prev) {
       const thin = out.prev.liquid ? "" : "  [THIN - no signals]";
@@ -1534,6 +1713,7 @@ class traderMachell {
       // 10-bar minimum growing PAST the anchor), and the histogram may
       // not cross the live edge when the window ends near it.
       if (ia !== undefined && ib !== undefined && ib > ia && out.accum.winHi) {
+        emits.accB = ia;
         items.push(box("accB", ia, ib, out.accum.winHi, out.accum.winLo, COLORS.accum));
         if (out.accum.rows) {
           let wCap = duMode ? Math.min(this.wAcc, Math.max(10, ib - ia)) : VIS.accMaxPx;
@@ -1546,8 +1726,9 @@ class traderMachell {
       // NEVER pin the ACCUM level at x0 when its window predates loaded
       // history (live 2026-08-09 evening: gold ray fabricated at the
       // session start) -- an old level honestly extends from the left edge
-      items.push(ray("accL", ia !== undefined ? ia : oldAnchor(out.accum.start, "accum"),
-        out.accum.level, COLORS.accum, 2, 1));
+      const iaRay = ia !== undefined ? ia : oldAnchor(out.accum.start, "accum");
+      emits.accL = iaRay;
+      items.push(ray("accL", iaRay, out.accum.level, COLORS.accum, 2, 1));
       // provenance suffix: when the rotation window sits LEFT of the
       // current session start, its box can be far off-viewport while this
       // right-edge label is all the trader sees of ACCUM -- say so
@@ -1735,25 +1916,18 @@ class traderMachell {
           : String(endIdx - r);
       };
       // emit=: the du x actually EMITTED for the ACCUM box/ray and the
-      // first session profile ("-" = item not drawn this frame). Compared
-      // against acc=..: one screenshot proves whether emitted geometry
-      // matches the resolved anchors (field report section 6).
-      const emitOf = key => {
-        const it = items.find(x2 => x2.key === key ||
-          (key === "sp" && x2.tag === "Shapes" && /^sp\d/.test(x2.key)));
-        if (!it) return "-";
-        if (it.tag === "Shapes") return String(it.primitives[0].position.x.v);
-        if (it.tag === "LineSegments") return String(it.lines[0].a.x.v);
-        return "-";
-      };
+      // first session profile ("-" = item not drawn this frame), recorded
+      // at CONSTRUCTION time in plain numbers. (v6.4 introspected the
+      // platform's du() objects here, which are opaque on live -- the
+      // "@undefined" readings in field report section 7 meant "cannot
+      // introspect", NOT "suppressed". Fixed.)
       items.push(frameTxt("stat4", 70, 72,
         "anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
         " i=" + i + " base=" + this.idxBase + " mirror=" + this.tmsList.length +
         " gap=" + (this.mirrorGapped ? 1 : 0) +
         " desync=" + (this._desync ? 1 : 0) +
         (out.accum ? " acc=" + age(out.accum.start) + ".." + age(out.accum.end) : "") +
-        " emit accB@" + emitOf("accB") + " accL@" + emitOf("accL") +
-        " sp@" + emitOf("sp") +
+        " emit accB@" + emits.accB + " accL@" + emits.accL + " sp@" + emits.sp +
         "   props: " + dump,
         COLORS.dim, FONT_SM));
     }

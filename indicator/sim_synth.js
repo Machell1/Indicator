@@ -273,7 +273,10 @@ check(lxItems.length > 0, 'no right-edge labels');
 const slots = new Set();
 for (const t of lxItems) {
   const y = t.point.y;
-  const slot = y.unit === 'op' ? `${y.a.v}@${y.b.v}` : `${y.v}@0`;
+  // slot includes the anchor x: the global column sits at i+4 while each
+  // session's key-value stack anchors at its own profile edge
+  const slot = t.point.x.v + ':' +
+    (y.unit === 'op' ? `${y.a.v}@${y.b.v}` : `${y.v}@0`);
   check(!slots.has(slot), 'label collision at slot ' + slot + ' (' + t.key + ')');
   slots.add(slot);
 }
@@ -323,9 +326,10 @@ if (aln.length) {
     !(x.style && x.style.fontSize && x.style.fill)).length === 0,
     'part2: Text items missing style');
   const lab2 = items2.filter(x => x.tag === 'Text' && !x.origin &&
-    x.textAlignment === 'rightMiddle');
-  // 14 labels: PREV POC/VAH/VAL, 2 NPOC, HTF POC/VAH/VAL, LEG, TP, SL
-  // + developing dPOC/dVAH/dVAL (SVP layer)
+    x.textAlignment === 'rightMiddle' && x.point.x.v === (n - 1) + 4);
+  // 14 labels in the GLOBAL right-edge column (per-session key values
+  // anchor at their own profile edges and are excluded by the x filter):
+  // PREV POC/VAH/VAL, 2 NPOC, HTF POC/VAH/VAL, LEG, TP, SL + dPOC/dVAH/dVAL
   check(lab2.length === 14, 'part2: expected 14 labels, got ' + lab2.length);
   const slots2 = new Set();
   let stacked = 0;
@@ -663,8 +667,10 @@ if (aln.length) {
       `part8: dayStart anchor ${dayLn8.lines[0].a.x.v} != ground truth ${gt(inst.lastOut.dayStartTms)}`);
   let spChecked = 0;
   for (const it of items8) {
-    if (it.tag !== 'Shapes' || !/^sp\d/.test(it.key)) continue;
-    const want = gt(Number(it.key.replace(/^sp/, '').replace(/[MVP]$/, '')));
+    // MP-look row keys: sp<startTms>C<bucket>
+    const m8 = it.tag === 'Shapes' && it.key.match(/^sp(\d+)C\d+$/);
+    if (!m8) continue;
+    const want = gt(Number(m8[1]));
     for (const pr of it.primitives)
       check(pr.position.x.v === want,
         `part8: session profile ${it.key} at ${pr.position.x.v} != ground truth ${want}`);
@@ -841,6 +847,104 @@ if (aln.length) {
   check(it10.every(x => x.key !== 'accB' && !x.key.startsWith('apro')),
     'part10c: inverted ACCUM window still drawn');
   console.log('part10 emitted geometry:    caps, pruning, provenance, inversion OK');
+}
+
+// -- part 11: MP_55396 look (docs/MP55396_CLONE_SPEC.md section 5). Ramp
+// colors on the Blue->Red line and monotone with time (ground truth by
+// construction), VA bracket geometry exact vs engine math, prominent
+// median switching, median-ray dedupe, no future-grid items. --
+{
+  const R11 = runModel('A', 500);
+  const inst = R11.inst;
+  const iLast = n - 1;
+  const L11 = inst.tmsList;
+  // two controlled sessions overlaid on real mirror timestamps:
+  //  FAKE1: 170/200 bars in band A early, 30 in band B late
+  //         -> A-rows early (blue-ish), B-rows late (red-ish), POC row
+  //         coverage 85% >= 80% -> PROMINENT median
+  //  FAKE2: 100/200 in each band -> POC coverage 50% -> plain median
+  const mkFake = (posEnd, splitA) => {
+    const ts = [];
+    for (let j = 0; j < 200; j++) ts.push(L11[L11.length - posEnd + j]);
+    const bars11 = [];
+    for (let j = 0; j < 200; j++) {
+      const inA = j < splitA;
+      bars11.push({ tMs: ts[j],
+        o: inA ? 100.2 : 104.2, c: inA ? 100.2 : 104.2,
+        h: inA ? 100.4 : 104.4, l: inA ? 100.0 : 104.0, vol: 50, delta: 0 });
+    }
+    return { key: 'FAKE' + posEnd, bars: bars11, startTms: ts[0], rows: null };
+  };
+  const f1 = mkFake(1400, 170), f2 = mkFake(1100, 100);
+  inst.core.sessions.push(f1, f2);
+  const items11 = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  const { buildProfile: bp11 } = require('./dale_core.js');
+
+  // ramp validity: every session-row fill is a pure R/B mix summing 255
+  const rampRe = /^#([0-9A-F]{2})00([0-9A-F]{2})$/;
+  const bucketsAt = {};   // fake1 band -> set of bucket indexes
+  let rampRows = 0;
+  for (const it of items11) {
+    const m11 = it.tag === 'Shapes' && it.key.match(/^sp(\d+)C(\d+)$/);
+    if (!m11) continue;
+    const cm = it.fillStyle.color.match(rampRe);
+    check(!!cm, 'part11: session row color off the Blue->Red line: ' + it.fillStyle.color);
+    if (cm) check(parseInt(cm[1], 16) + parseInt(cm[2], 16) === 255,
+      'part11: R+B != 255: ' + it.fillStyle.color);
+    rampRows++;
+    if (Number(m11[1]) === f1.startTms) {
+      for (const pr of it.primitives) {
+        const band = pr.position.y.v < 102 ? 'A' : 'B';
+        (bucketsAt[band] = bucketsAt[band] || new Set()).add(Number(m11[2]));
+      }
+    }
+  }
+  check(rampRows > 0, 'part11: no ramp session rows drawn');
+  // monotone with mean time: every early-band bucket < every late-band one
+  check(bucketsAt.A && bucketsAt.B, 'part11: fake session bands missing');
+  if (bucketsAt.A && bucketsAt.B)
+    check(Math.max(...bucketsAt.A) < Math.min(...bucketsAt.B),
+      'part11: ramp not monotone with mean time (A=' +
+      [...bucketsAt.A] + ' B=' + [...bucketsAt.B] + ')');
+
+  // prominent median on FAKE1 (yellow, width 4), plain on FAKE2
+  const med1 = items11.find(x => x.key === 'sp' + f1.startTms + 'M');
+  const med2 = items11.find(x => x.key === 'sp' + f2.startTms + 'M');
+  check(!!med1 && med1.lineStyle.lineWidth === 4 && med1.lineStyle.color === '#FFFF00',
+    'part11: prominent median not yellow/thick');
+  check(!!med2 && med2.lineStyle.lineWidth === 1 && med2.lineStyle.color === '#FFFFFF',
+    'part11: plain median wrong style');
+
+  // VA bracket: 4 segments, VAH/VAL exact vs an independent engine-math
+  // recompute, spans equal to the profile width
+  const prof11 = bp11(f1.bars, Math.max((104.4 - 100.0) / inst.core.cfg.rows, 1e-9));
+  const brk = items11.find(x => x.key === 'sp' + f1.startTms + 'B');
+  check(!!brk && brk.lines.length === 4, 'part11: VA bracket segments != 4');
+  if (brk && prof11) {
+    const ys = brk.lines.map(l => [l.a.y.v, l.b.y.v]).flat();
+    check(Math.abs(Math.max(...ys) - prof11.vah) < 1e-9 &&
+      Math.abs(Math.min(...ys) - prof11.val) < 1e-9,
+      'part11: bracket VAH/VAL do not match engine math');
+    const horiz = brk.lines.filter(l => l.a.y.v === l.b.y.v);
+    const medSpan = med1.lines[0].b.x.v - med1.lines[0].a.x.v;
+    for (const l of horiz)
+      check(l.b.x.v - l.a.x.v === medSpan, 'part11: bracket span != profile width');
+  }
+  // key values present at the profile edge; median ray present, then
+  // deduped when an untested naked POC owns the level
+  check(items11.some(x => x.key === 'sp' + f1.startTms + 'TP'),
+    'part11: key-value text missing');
+  check(items11.some(x => x.key === 'sp' + f1.startTms + 'R'),
+    'part11: median ray missing');
+  inst.lastOut.nakedPocs = [{ poc: prof11.poc, endTms: f1.bars[10].tMs }];
+  const items11b = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  check(items11b.every(x => x.key !== 'sp' + f1.startTms + 'R'),
+    'part11: median ray not deduped against naked POC');
+  // v6.4 guards cover the new elements
+  const s311 = items11.find(x => x.key === 'stat3');
+  check(s311 && s311.text.indexOf('[future-grid') < 0,
+    'part11: MP elements tripped the future-grid guard');
+  console.log('part11 MP_55396 look:       ramp, medians, bracket, dedupe OK');
 }
 
 const kindsOf = c => {
