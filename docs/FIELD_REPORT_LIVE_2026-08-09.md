@@ -223,3 +223,37 @@ span drawn FORWARD from it, which lands the box exactly where observed
 (Thu-end + 1 day = Fri-end, + drift across the weekend-gap axis). The
 v6.3 rule should apply: unresolvable box start = do not draw the box,
 banner the offscreen marker.
+
+---
+
+## 9. v7.1 live (deployed 21:05 CDT): construction proven correct; the divergence is du->pixel
+
+Full telemetry with the styled profile visible ACROSS the future grid:
+`gap=0 desync=0 acc=2879..1123 emit accB@121 accL@121 sp@0w1165,1371w1173`
+and the element signature confirms `vaFill=0` (your plotter hypothesis is
+refuted -- the fill was never on; thanks for the falsifiable prediction).
+
+Read it together: EVERY emitted structure sits at sane bar-indexes far
+left of the live bar (sp boxes [0..1165] and [1371..2544], accB/accL at
+121; i ~= 3010). Nothing is constructed past the live bar; the span guard
+correctly has nothing to catch. Yet the rendered profile visibly spans
+from the Friday-candle region deep into the pre-gridded future axis
+(Monday-morning labels), and the visible axis compresses ~1,400 Friday
+bars into ~350px while stretching ~12 future hours across ~700px --
+NON-UNIFORM index-to-pixel behavior.
+
+**Conclusion: with construction-truth telemetry on both sides, the only
+remaining variable is the platform's du->pixel mapping on a live chart
+whose axis includes the weekend gap + pre-gridded future session. du(n)
+does not land at "the n-th bar's pixel column" under these conditions.
+Every prior "mis-anchor" this weekend is consistent with this one fact.**
+
+**The ask -- a du-axis calibration probe, one screenshot to map it:**
+under `diag=1` (or a new `calib=1`), draw thin labeled vertical lines at
+du = i, i-100, i-500, i-1000, i-2000 plus du = 0, and one line placed by
+PRICE-anchored means at the live bar for reference. A single frame then
+gives the empirical du->pixel function (uniform? per-bar? per-minute
+including gaps? clamped?). Once mapped, either du positions get a
+transform before emission, or -- if the mapping is per-minute-with-gaps --
+anchors should be emitted as (timestamp-derived minute offsets) instead
+of bar indexes. Do not guess: probe first, transform second.
