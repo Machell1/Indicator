@@ -201,12 +201,30 @@ function pNum(v, dflt) {
   return Number.isFinite(n) && n > 0 ? n : dflt;
 }
 
+// ---- du emission transform (field report section 10) ---------------------
+// MEASURED PLATFORM FACT (v7.2 probe, live 2026-08-09 21:41 CDT): on a
+// LIVE chart, du(n) addresses the n-th MINUTE-SLOT of the laid-out time
+// axis (weekend gap compressed, future session pre-gridded), NOT the n-th
+// bar of the data array. Pre-open the two spaces coincide.
+// Therefore: ALL internal logic (mirror, anchors, guards, telemetry)
+// stays bar-index-true, and ONLY the final du() emission converts a bar
+// index to a minute-slot -- x_du = (bar_timestamp - layout_origin_ts) /
+// 60000 / barMinutes -- through the frame's DU_T, a piecewise-linear
+// index->timestamp map built from the mirror (exact at every pushed bar,
+// interpolated between, extrapolated 1 slot/index beyond the ends). The
+// layout origin defaults to the current session start (the probe placed
+// du 0 there) and is calibratable live via originShift (minutes).
+// duX() replaces du() at every X-coordinate emission site; Y (price) and
+// px/frame coordinates are untouched.
+let DU_T = v => v;                 // identity when the transform is off
+function duX(v) { return du(DU_T(v)); }
+
 // ---- primitive helpers ---------------------------------------------------
 function ray(key, x0, price, color, width, dash) {
   return {
     tag: "LineSegments", key, global: true,
     lines: [{ tag: "Line",
-      a: { x: du(x0), y: du(price) }, b: { x: du(x0 + 1), y: du(price) },
+      a: { x: duX(x0), y: du(price) }, b: { x: duX(x0 + 1), y: du(price) },
       infiniteEnd: true }],
     lineStyle: { lineWidth: width, color, lineStyle: dash || 1 },
   };
@@ -214,14 +232,14 @@ function ray(key, x0, price, color, width, dash) {
 function vline(key, x, pLo, pHi, color, dash) {
   return {
     tag: "LineSegments", key, global: true,
-    lines: [{ tag: "Line", a: { x: du(x), y: du(pLo) }, b: { x: du(x), y: du(pHi) } }],
+    lines: [{ tag: "Line", a: { x: duX(x), y: du(pLo) }, b: { x: duX(x), y: du(pHi) } }],
     lineStyle: { lineWidth: 1, color, lineStyle: dash || 3 },
   };
 }
 function txt(key, x, price, s, color, dyPx, font, align) {
   return {
     tag: "Text", key, global: true,
-    point: { x: du(x), y: dyPx ? op(du(price), "-", px(dyPx)) : du(price) },
+    point: { x: duX(x), y: dyPx ? op(du(price), "-", px(dyPx)) : du(price) },
     text: s,
     style: Object.assign({ fill: color }, font || FONT),
     // rightMiddle extends text to the RIGHT of the anchor (into the empty
@@ -240,14 +258,17 @@ function frameTxt(key, xPx, yPx, s, color, font) {
   };
 }
 // the ONLY places a Rectangle's y anchor is decided. pLo/pHi are prices.
+// vrect widths are transformed by ENDPOINTS (T(x+w) - T(x)) so a span
+// stays exact even when it crosses a session-halt gap in minute-space.
 function vrect(x, wDu, pLo, pHi) {
+  const xT = DU_T(x);
   return { tag: "Rectangle",
-    position: { x: du(x), y: du(RECT_Y_ANCHOR === "bottom" ? pLo : pHi) },
-    size: { width: du(wDu), height: du(pHi - pLo) } };
+    position: { x: du(xT), y: du(RECT_Y_ANCHOR === "bottom" ? pLo : pHi) },
+    size: { width: du(DU_T(x + wDu) - xT), height: du(pHi - pLo) } };
 }
 function pxrect(x, wPx, pLo, pHi) {
   return { tag: "Rectangle",
-    position: { x: du(x), y: du(RECT_Y_ANCHOR === "bottom" ? pLo : pHi) },
+    position: { x: duX(x), y: du(RECT_Y_ANCHOR === "bottom" ? pLo : pHi) },
     size: { width: px(wPx), height: du(pHi - pLo) } };
 }
 
@@ -293,10 +314,10 @@ function box(key, xA, xB, hi, lo, color, dash) {
   return {
     tag: "LineSegments", key, global: true,
     lines: [
-      { tag: "Line", a: { x: du(xA), y: du(hi) }, b: { x: du(xB), y: du(hi) } },
-      { tag: "Line", a: { x: du(xA), y: du(lo) }, b: { x: du(xB), y: du(lo) } },
-      { tag: "Line", a: { x: du(xA), y: du(hi) }, b: { x: du(xA), y: du(lo) } },
-      { tag: "Line", a: { x: du(xB), y: du(hi) }, b: { x: du(xB), y: du(lo) } },
+      { tag: "Line", a: { x: duX(xA), y: du(hi) }, b: { x: duX(xB), y: du(hi) } },
+      { tag: "Line", a: { x: duX(xA), y: du(lo) }, b: { x: duX(xB), y: du(lo) } },
+      { tag: "Line", a: { x: duX(xA), y: du(hi) }, b: { x: duX(xA), y: du(lo) } },
+      { tag: "Line", a: { x: duX(xB), y: du(hi) }, b: { x: duX(xB), y: du(lo) } },
     ],
     lineStyle: { lineWidth: 1, color, lineStyle: dash || 3 },
   };
@@ -392,6 +413,11 @@ class traderMachell {
       alignTest: pBool(p.alignTest, false),
       diag: pBool(p.diag, false),
       calib: pBool(p.calib, false),          // du-axis calibration probe (section 9)
+      // du emission mode (section 10): 0 = bar-index (pre-open behavior,
+      // Saturday-proven), 1 = minute-slots (live axis, measured), 2 = AUTO
+      // (minute-slots only while the chart is live: last pushed bar fresh)
+      duTime: [0, 1, 2].indexOf(Number(p.duTime)) >= 0 ? Number(p.duTime) : 2,
+      originShift: Number.isFinite(Number(p.originShift)) ? Number(p.originShift) : 0,
     };
   }
 
@@ -695,6 +721,38 @@ class traderMachell {
     return res;
   }
 
+  // index -> minute-slot conversion for the du emission transform.
+  // Piecewise-linear through the mirror's (current-frame index, timestamp)
+  // pairs: exact at every pushed bar, time-interpolated between entries
+  // (a span crossing a session halt widens by the halt's minutes, exactly
+  // like the laid-out axis), extrapolated 1 slot per index beyond the
+  // ends (the pre-gridded future and the pre-history left).
+  _slotOf(v, originTs) {
+    const L = this.tmsList, base = this.idxBase, mPer = this.barMin * 60e3;
+    const nL = L.length;
+    if (!nL) return v;
+    const idxAt = p => this.idxList[p] + base;
+    let ts;
+    const iFirst = idxAt(0), iLast = idxAt(nL - 1);
+    if (v <= iFirst) ts = L[0] + (v - iFirst) * mPer;
+    else if (v >= iLast) ts = L[nL - 1] + (v - iLast) * mPer;
+    else {
+      // binary search the mirror by current-frame index (ascending)
+      let lo = 0, hi = nL - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (idxAt(mid) < v) lo = mid + 1; else hi = mid;
+      }
+      const iHi = idxAt(lo);
+      if (iHi === v) ts = L[lo];
+      else {
+        const iLo = idxAt(lo - 1);
+        ts = L[lo - 1] + (v - iLo) * (L[lo] - L[lo - 1]) / (iHi - iLo);
+      }
+    }
+    return (ts - originTs) / mPer;
+  }
+
   // independent pure tail-offset reference for the mismatch cross-check:
   // no trust selection, no base, no stored indexes -- just the entry's
   // position in the mirror counted from the newest entry.
@@ -728,6 +786,16 @@ class traderMachell {
     const endIdx = this.lastPushedMs === d.timestamp().getTime() ? i : i - 1;
     this._desync = false;
     this._overshoot = false;
+    // ---- du emission transform for this frame (section 10) ----
+    // AUTO engages minute-slots only when the chart is live (the measured
+    // divergence exists only once the live template is laid out; pre-open
+    // the spaces coincide and bar-index emission is the Saturday-proven
+    // behavior).
+    const tMode = O.duTime === 1 ||
+      (O.duTime === 2 && this.lastPushedMs > 0 &&
+        Date.now() - this.lastPushedMs < 3 * this.barMin * 60e3);
+    const originTs = (out.dayStartTms || 0) + O.originShift * 60e3;
+    DU_T = tMode ? (v => this._slotOf(v, originTs)) : (v => v);
     // per-layer anchor-vs-timestamp cross-check (live field report section
     // 5): every consumer resolves through idx(t, layer); the resolved
     // anchor is compared against an INDEPENDENT pure tail-offset reference
@@ -877,7 +945,7 @@ class traderMachell {
         // median line across the profile width; prominent = thick yellow
         items.push({ tag: "LineSegments", key: K + "M", global: true,
           lines: [{ tag: "Line",
-            a: { x: du(six), y: du(mp.poc) }, b: { x: du(six + wS), y: du(mp.poc) } }],
+            a: { x: duX(six), y: du(mp.poc) }, b: { x: duX(six + wS), y: du(mp.poc) } }],
           lineStyle: mp.prominent
             ? { lineWidth: 4, color: "#FFFF00", lineStyle: 1 }
             : { lineWidth: 1, color: "#FFFFFF", lineStyle: 1 } });
@@ -894,10 +962,10 @@ class traderMachell {
         // VA bracket: VAH/VAL spans + vertical connectors at both edges
         items.push({ tag: "LineSegments", key: K + "B", global: true,
           lines: [
-            { tag: "Line", a: { x: du(six), y: du(mp.vah) }, b: { x: du(six + wS), y: du(mp.vah) } },
-            { tag: "Line", a: { x: du(six), y: du(mp.val) }, b: { x: du(six + wS), y: du(mp.val) } },
-            { tag: "Line", a: { x: du(six), y: du(mp.vah) }, b: { x: du(six), y: du(mp.val) } },
-            { tag: "Line", a: { x: du(six + wS), y: du(mp.vah) }, b: { x: du(six + wS), y: du(mp.val) } },
+            { tag: "Line", a: { x: duX(six), y: du(mp.vah) }, b: { x: duX(six + wS), y: du(mp.vah) } },
+            { tag: "Line", a: { x: duX(six), y: du(mp.val) }, b: { x: duX(six + wS), y: du(mp.val) } },
+            { tag: "Line", a: { x: duX(six), y: du(mp.vah) }, b: { x: duX(six), y: du(mp.val) } },
+            { tag: "Line", a: { x: duX(six + wS), y: du(mp.vah) }, b: { x: duX(six + wS), y: du(mp.val) } },
           ],
           lineStyle: { lineWidth: 1, color: "#FFFFFF", lineStyle: 1 } });
         // key values at the profile's right edge (fanned per session)
@@ -981,7 +1049,7 @@ class traderMachell {
       const nd = this._nodesOf(out);
       if (nd && (nd.lvns.length || nd.hvns.length)) {
         const tick = pr => ({ tag: "Line",
-          a: { x: du(x0), y: du(pr) }, b: { x: du(x0 + 6), y: du(pr) } });
+          a: { x: duX(x0), y: du(pr) }, b: { x: duX(x0 + 6), y: du(pr) } });
         if (nd.lvns.length)
           items.push({ tag: "LineSegments", key: "ndL", global: true,
             lines: nd.lvns.map(n => tick(n.price)),
@@ -1200,9 +1268,12 @@ class traderMachell {
         seen.add(xP);
         items.push(vline("calL" + nm, xP, cNow - half, cNow + half, COLORS.test, 1));
         // vertical stagger: when the mapping bunches lines together the
-        // labels still read apart
+        // labels still read apart. In t-du mode the label also prints the
+        // POST-transform slot so the before/after verification is a
+        // direct reading (section 10: same probe, both sides).
         items.push(txt("calT" + nm, xP, cNow + half - pn * (half / 4),
-          " du " + xP + " (" + nm + ")", COLORS.test, 0, FONT_SM));
+          " du " + xP + " (" + nm + ")" +
+          (tMode ? " slot " + Math.round(DU_T(xP)) : ""), COLORS.test, 0, FONT_SM));
         pn++;
       }
       // price-anchored reference (the y axis is proven): a horizontal ray
@@ -1248,7 +1319,9 @@ class traderMachell {
     // up/down 1-min volume; live delta is the platform's bid/ask split,
     // corr 0.87 -- this caveat must stay on the banner)
     ctx.push("delta=bid/ask proxy (graded on up/down)");
-    ctx.push(duMode ? "[du]" : "[px]");     // effective mode, always visible
+    // effective modes, always visible: [t-du] = minute-slot emission
+    // active (live axis), [du] = bar-index emission, [px] = px widths
+    ctx.push(duMode ? (tMode ? "[t-du]" : "[du]") : "[px]");
     items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
       out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
       FONT_SM));
@@ -1285,6 +1358,7 @@ class traderMachell {
         " desync=" + (this._desync ? 1 : 0) +
         (out.accum ? " acc=" + age(out.accum.start) + ".." + age(out.accum.end) : "") +
         " emit accB@" + emits.accB + " accL@" + emits.accL + " sp@" + emits.sp +
+        (tMode ? " tdu origin=" + originTs + "+" + O.originShift + "m" : "") +
         "   props: " + dump,
         COLORS.dim, FONT_SM));
     }
@@ -1357,6 +1431,8 @@ module.exports = {
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner
     calib: predef.paramSpecs.number(0, 1, 0),         // 1 = du-axis calibration probe (one screenshot maps du->pixel)
+    duTime: predef.paramSpecs.number(2, 1, 0),        // du emission: 0 = bar-index, 1 = minute-slots, 2 = auto (live only)
+    originShift: predef.paramSpecs.number(0, 1),      // minutes added to the layout origin (live calibration)
   },
 };
 

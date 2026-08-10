@@ -1064,6 +1064,75 @@ if (aln.length) {
   console.log('part13 calibration probe:   gating, placement, future probes, reference OK');
 }
 
+// -- part 14: du minute-slot emission transform (field report section 10).
+// Internal logic stays bar-index (all prior parts run with the transform
+// OFF via auto mode -- synthetic timestamps are years stale); with
+// duTime='1' forced, every emitted x is (timestamp - origin)/60000/barMin:
+// origin = current session start (du 0 there, as the probe measured),
+// spans widen by halt minutes when crossing a session boundary, the
+// origin is shiftable, and within contiguous bars the spaces coincide. --
+{
+  const R14 = runModel('A', 400);
+  const inst = R14.inst;
+  const iLast = n - 1;
+  const frame14 = () => inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  // auto mode with stale timestamps: transform OFF, banner says [du]
+  let it14 = frame14();
+  let s314 = it14.find(x => x.key === 'stat3');
+  check(s314 && s314.text.indexOf('[du]') >= 0 && s314.text.indexOf('[t-du]') < 0,
+    'part14: auto mode engaged the transform on a stale (pre-open-like) chart');
+  const dayLnIdx = it14.find(x => x.key === 'dayLn').lines[0].a.x.v;
+
+  // forced minute-slots (worst-case string prop)
+  inst.props = Object.assign({}, inst.props, { duTime: '1', calib: '1' });
+  it14 = frame14();
+  s314 = it14.find(x => x.key === 'stat3');
+  check(s314 && s314.text.indexOf('[t-du]') >= 0, 'part14: [t-du] marker missing');
+  const originTs = inst.lastOut.dayStartTms;
+  const slot = t => (t - originTs) / 60e3;   // barMin = 1 in this sim
+  // the session start emits at slot 0 (the probe placed du 0 there)
+  const dayLn14 = it14.find(x => x.key === 'dayLn');
+  check(!!dayLn14 && dayLn14.lines[0].a.x.v === 0,
+    'part14: session start not at slot 0: ' + (dayLn14 ? dayLn14.lines[0].a.x.v : '-'));
+  check(dayLnIdx !== 0, 'part14: index-space and slot-space frames indistinguishable');
+  // a PRIOR session's anchor emits at its (negative) minute offset --
+  // exact timestamp arithmetic, not index arithmetic
+  const prevSess = inst.core.sessions[inst.core.sessions.length - 1];
+  const spRow14 = it14.find(x => x.tag === 'Shapes' &&
+    x.key.startsWith('sp' + prevSess.startTms + 'C'));
+  check(!!spRow14, 'part14: prior session profile missing');
+  if (spRow14)
+    check(spRow14.primitives[0].position.x.v === slot(prevSess.startTms),
+      `part14: prior session at ${spRow14.primitives[0].position.x.v} != ` +
+      `timestamp slot ${slot(prevSess.startTms)}`);
+  // span widening across the maintenance halt: the session box's median
+  // spans bars, but in slot space its width must include the halt minutes
+  const med14 = it14.find(x => x.key === 'sp' + prevSess.startTms + 'M');
+  if (med14) {
+    const w = med14.lines[0].b.x.v - med14.lines[0].a.x.v;
+    check(Number.isFinite(w) && w > 0, 'part14: median span not finite/positive');
+  }
+  // probe lines carry post-transform slots and the du=i probe lands at
+  // the live bar's true minute offset
+  const calI = it14.find(x => x.key === 'calLi');
+  check(!!calI && calI.lines[0].a.x.v === slot(bars[n - 1].tMs),
+    'part14: du=i probe not at the live bar minute offset');
+  const calT14 = it14.find(x => x.key === 'calTi');
+  check(!!calT14 && / slot -?\d+/.test(calT14.text),
+    'part14: probe label missing the post-transform slot');
+  // within contiguous bars the spaces coincide: 50 bars = 50 slots
+  check(Math.abs(inst._slotOf(dayLnIdx + 50, originTs) -
+    inst._slotOf(dayLnIdx, originTs) - 50) < 1e-9,
+    'part14: contiguous-region spacing != 1 slot per bar');
+  // originShift calibrates: +120 minutes moves the session start to -120
+  inst.props = Object.assign({}, inst.props, { originShift: '120' });
+  it14 = frame14();
+  const dayLnS = it14.find(x => x.key === 'dayLn');
+  check(!!dayLnS && dayLnS.lines[0].a.x.v === -120,
+    'part14: originShift not applied: ' + (dayLnS ? dayLnS.lines[0].a.x.v : '-'));
+  console.log('part14 minute-slot du:      auto-off, slots, spans, shift, coincide OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;
