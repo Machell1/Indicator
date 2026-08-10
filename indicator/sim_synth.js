@@ -1133,6 +1133,128 @@ if (aln.length) {
   console.log('part14 minute-slot du:      auto-off, slots, spans, shift, coincide OK');
 }
 
+// -- part 15: timeframe anchoring (TIMEFRAME_ANCHORING_SPEC.md section 4).
+// 15a: the same session data on 1/5/15/30-minute charts must anchor every
+// structure at the same TIMESTAMP (slot arithmetic scales with barMin),
+// and the POC/VAH/VAL drift from coarser binning is measured and
+// reported as numbers. 15b: a live timeframe switch on a surviving
+// instance must self-reset (fresh mirror at the new spacing, correct
+// anchors, reloading marker, coarse-bin asterisks). --
+{
+  const aggTo = (src, k) => {
+    const m = new Map();
+    for (const b of src) {
+      const slot = Math.floor(b.tMs / (k * 60e3)) * k * 60e3;
+      let e = m.get(slot);
+      if (!e) {
+        e = { tMs: slot, o: b.o, h: b.h, l: b.l, c: b.c,
+          vol: 0, offv: 0, bidv: 0 };
+        m.set(slot, e);
+      }
+      if (b.h > e.h) e.h = b.h;
+      if (b.l < e.l) e.l = b.l;
+      e.c = b.c;
+      e.vol += b.vol; e.offv += b.offv; e.bidv += b.bidv;
+    }
+    return [...m.values()].sort((a, b) => a.tMs - b.tMs);
+  };
+  const src15 = bars.slice(0, 2 * 1380 + 600);   // two sessions + a tail
+  const runTf = k => {
+    const inst = new Calc();
+    inst.props = { htfSessions: 20, duTime: '1' };
+    inst.contractInfo = { tickSize: 0.1 };
+    inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: k };
+    inst.init();
+    const ents = aggTo(src15, k).map((b, j, arr) =>
+      entity(b, j === arr.length - 1, true));
+    let res15 = null;
+    for (let j = 0; j < ents.length; j++)
+      res15 = inst.map(ents[j], j, makeHistory(ents.slice(0, j + 1)));
+    return { inst, items: res15.graphics.items, k };
+  };
+  const runs = [1, 5, 15, 30].map(runTf);
+  const tsOfSlot = (r, slot) =>
+    r.inst.lastOut.dayStartTms + slot * r.k * 60e3;
+  // (a) session-start and prior-session anchors identical in TIMESTAMP
+  const ref15 = runs[0];
+  const refDay = tsOfSlot(ref15, ref15.items.find(x => x.key === 'dayLn').lines[0].a.x.v);
+  for (const r of runs) {
+    check(r.inst.barMin === r.k, `part15a: barMin ${r.inst.barMin} != ${r.k}`);
+    const dl = r.items.find(x => x.key === 'dayLn');
+    check(!!dl && tsOfSlot(r, dl.lines[0].a.x.v) === refDay,
+      `part15a: ${r.k}M session start at a different timestamp`);
+    const prev15 = r.inst.core.sessions[r.inst.core.sessions.length - 1];
+    const row15 = r.items.find(x => x.tag === 'Shapes' &&
+      x.key.startsWith('sp' + prev15.startTms + 'C'));
+    check(!!row15 && tsOfSlot(r, row15.primitives[0].position.x.v) === prev15.startTms,
+      `part15a: ${r.k}M prior-session anchor off its timestamp`);
+    check(prev15.startTms === runs[0].inst.core.sessions[
+      runs[0].inst.core.sessions.length - 1].startTms,
+      `part15a: ${r.k}M aggregation shifted the session start timestamp`);
+  }
+  // (b) measure the section-3 drift: POC/VAH/VAL per timeframe vs 1M
+  const lv = runs.map(r => ({ k: r.k, poc: r.inst.core.prev.poc,
+    vah: r.inst.core.prev.vah, val: r.inst.core.prev.val }));
+  const drift = lv.slice(1).map(x =>
+    `${x.k}M dPOC=${(x.poc - lv[0].poc).toFixed(2)} ` +
+    `dVAH=${(x.vah - lv[0].vah).toFixed(2)} dVAL=${(x.val - lv[0].val).toFixed(2)}`);
+  for (const x of lv)
+    check(Number.isFinite(x.poc) && Number.isFinite(x.vah) && Number.isFinite(x.val),
+      'part15a: non-finite levels at ' + x.k + 'M');
+  // coarse-bin disclosure: 1M labels unmarked, 30M labels asterisked
+  const poc1 = runs[0].items.find(x => x.key === 'pocT');
+  const poc30 = runs[3].items.find(x => x.key === 'pocT');
+  check(!!poc1 && poc1.text.indexOf('*') < 0, 'part15a: 1M label falsely marked');
+  check(!!poc30 && /\d\*/.test(poc30.text), 'part15a: 30M label missing the * mark');
+  const s315 = runs[3].items.find(x => x.key === 'stat3');
+  check(s315 && s315.text.indexOf('* marks 30-min-bin levels') >= 0,
+    'part15a: CAUTION line does not explain the mark');
+
+  // 15b: live switch 1M -> 5M on a SURVIVING instance (the platform keeps
+  // stale state across timeframe changes -- community-confirmed)
+  const inst15 = new Calc();
+  inst15.props = { htfSessions: 20 };
+  inst15.contractInfo = { tickSize: 0.1 };
+  inst15.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  inst15.init();
+  const ents1m = src15.slice(0, 2000).map((b, j) => entity(b, j === 1999, j < 1999));
+  for (let j = 0; j < ents1m.length; j++)
+    inst15.map(ents1m[j], j, makeHistory(ents1m.slice(0, j + 1)));
+  const mirror1m = inst15.tmsList.length;
+  // the chart flips to 5M and re-feeds the whole array at the new spacing
+  inst15.chartDescription = { underlyingType: 'MinuteBar', elementSize: 5 };
+  const ents5m = aggTo(src15.slice(0, 2100), 5).map((b, j, arr) =>
+    entity(b, j === arr.length - 1, true));
+  let early15 = null, res15b = null;
+  for (let j = 0; j < ents5m.length; j++) {
+    res15b = inst15.map(ents5m[j], j, makeHistory(ents5m.slice(0, j + 1)));
+    if (j === 20) early15 = inst15.buildItems(ents5m[20], 20, null);
+  }
+  check(inst15.barMin === 5, 'part15b: barMin not rebuilt on switch');
+  check(inst15.tmsList.length < mirror1m,
+    'part15b: mirror not cleared on switch');
+  check(inst15.tmsList[1] - inst15.tmsList[0] === 5 * 60e3,
+    'part15b: mirror spacing not 5-minute after switch');
+  const sE = early15 && early15.find(x => x.key === 'stat3');
+  check(!!sE && sE.text.indexOf('[timeframe changed - reloading]') >= 0,
+    'part15b: reloading marker missing while the mirror refills');
+  const itF = res15b.graphics.items;
+  const sF = itF.find(x => x.key === 'stat3');
+  check(sF && sF.text.indexOf('[timeframe changed') < 0,
+    'part15b: reloading marker stuck after refill');
+  const dlF = itF.find(x => x.key === 'dayLn');
+  const gt15 = (() => {
+    const t = inst15.lastOut.dayStartTms;
+    for (let j = ents5m.length - 1; j >= 0; j--)
+      if (ents5m[j].timestamp().getTime() === t) return j;
+    return -1;
+  })();
+  check(!!dlF && dlF.lines[0].a.x.v === gt15,
+    'part15b: session anchor displaced after the switch');
+  console.log('part15 timeframe anchors:   ts-identical across 1/5/15/30; drift ' +
+    drift.join('  ') + '; live switch reset OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

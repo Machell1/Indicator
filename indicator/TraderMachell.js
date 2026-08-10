@@ -1115,6 +1115,33 @@ class traderMachell {
     this._overshoot = false;
     this.mirrorGapped = false;    // sticky: the walk-back stranded bars at
     // least once, so the mirror may not be one-entry-per-chart-bar
+    this._tfReset = false;        // a timeframe change just rebuilt state
+  }
+
+  // ---- timeframe-change detection (TIMEFRAME_ANCHORING_SPEC.md sec 1) ----
+  // The trader toggles 1M/5M/15M/30M constantly, and the platform is
+  // KNOWN to keep a graphics indicator's state across a timeframe change
+  // (community-reported: values stay stale until re-save/re-add). A stale
+  // mirror carries (index, timestamp) pairs at the OLD bar spacing, so
+  // _slotOf interpolates wrongly and every emitted x displaces by the
+  // timeframe ratio. Two independent detectors, both cheap, run on every
+  // map call; either one triggers a FULL self-reset (fresh core, mirror,
+  // caches, barMin, caps) and a banner state while the mirror refills.
+  _checkTimeframe(d) {
+    const cd = this.chartDescription;
+    const em = (cd && cd.underlyingType === "MinuteBar" && cd.elementSize > 0)
+      ? cd.elementSize : this.barMin;
+    const dMs = d.timestamp().getTime();
+    // a NEW bar arriving finer than the known period is the same signal
+    // from the data side (elementSize may lag or be unavailable);
+    // coarser deltas are indistinguishable from session gaps and are
+    // covered by the elementSize read
+    const finer = this.lastPushedMs > 0 && dMs > this.lastPushedMs &&
+      dMs - this.lastPushedMs < this.barMin * 60e3;
+    if (em !== this.barMin || finer) {
+      this.init();
+      this._tfReset = true;
+    }
   }
 
   // effective options, re-derived EVERY draw from coerced props (field
@@ -1330,6 +1357,7 @@ class traderMachell {
   }
 
   map(d, i, history) {
+    this._checkTimeframe(d);
     // prepend rebase (Q2): a bar we have ALREADY pushed reveals its
     // current chart index; any shift versus what we stored means history
     // back-loading moved every index -- re-measure the frame offset so
@@ -1562,6 +1590,13 @@ class traderMachell {
       labels.push({ key, price, text, color, font });
     const fmt = p => (this.contractInfo && this.contractInfo.tickSize < 0.01)
       ? p.toFixed(3) : p.toFixed(1);
+    // TIMEFRAME_ANCHORING_SPEC.md section 3B (constrain + disclose): every
+    // profile-derived LEVEL label carries "*" when built from coarser
+    // bins than the graded 1-minute basis -- a coarse-bin level must
+    // never be mistaken for the graded one. The banner CAUTION line
+    // explains the mark.
+    const q = this.barMin !== 1 ? "*" : "";
+    const fmtL = p => fmt(p) + q;
 
     // (the status banner is emitted at the END of this function: the
     // [mirror desync] / [anchor overshoot] flags are raised inside the
@@ -1687,9 +1722,9 @@ class traderMachell {
           lineStyle: { lineWidth: 1, color: "#FFFFFF", lineStyle: 1 } });
         // key values at the profile's right edge (fanned per session)
         items.push(...layoutLabels([
-          { key: K + "TH", price: mp.vah, text: "VAH " + fmt(mp.vah), color: "#FFFFFF", font: FONT_XS },
-          { key: K + "TP", price: mp.poc, text: "POC " + fmt(mp.poc), color: "#FFFFFF", font: FONT_XS },
-          { key: K + "TL", price: mp.val, text: "VAL " + fmt(mp.val), color: "#FFFFFF", font: FONT_XS },
+          { key: K + "TH", price: mp.vah, text: "VAH " + fmtL(mp.vah), color: "#FFFFFF", font: FONT_XS },
+          { key: K + "TP", price: mp.poc, text: "POC " + fmtL(mp.poc), color: "#FFFFFF", font: FONT_XS },
+          { key: K + "TL", price: mp.val, text: "VAL " + fmtL(mp.val), color: "#FFFFFF", font: FONT_XS },
         ], six + wS + 2, out.atr || 0));
       }
       // full per-session telemetry (field report section 8: the culprit
@@ -1715,11 +1750,11 @@ class traderMachell {
           COLORS.profile, COLORS.profileVA, COLORS.dev,
           duMode ? capW(this.wPrev) : VIS.prevMaxPx, duMode));
       items.push(ray("dpocL", rayX0, dev.poc, COLORS.dev, 2, 2));
-      lab("dpocT", dev.poc, "dPOC " + fmt(dev.poc), COLORS.dev, FONT_SM);
+      lab("dpocT", dev.poc, "dPOC " + fmtL(dev.poc), COLORS.dev, FONT_SM);
       items.push(ray("dvahL", rayX0, dev.vah, COLORS.dev, 1, 5));
-      lab("dvahT", dev.vah, "dVAH " + fmt(dev.vah), COLORS.dev, FONT_SM);
+      lab("dvahT", dev.vah, "dVAH " + fmtL(dev.vah), COLORS.dev, FONT_SM);
       items.push(ray("dvalL", rayX0, dev.val, COLORS.dev, 1, 5));
-      lab("dvalT", dev.val, "dVAL " + fmt(dev.val), COLORS.dev, FONT_SM);
+      lab("dvalT", dev.val, "dVAL " + fmtL(dev.val), COLORS.dev, FONT_SM);
     } else if (!O.dev && out.prevProf && histOk) {
       // v4-layout projection of the prior session at today's start,
       // restyled with the same Blue->Red ramp so the chart reads as one
@@ -1752,11 +1787,11 @@ class traderMachell {
     if (out.prev) {
       const thin = out.prev.liquid ? "" : "  [THIN - no signals]";
       items.push(ray("pocL", rayX0, out.prev.poc, COLORS.poc, 3, 1));
-      lab("pocT", out.prev.poc, "PREV POC " + fmt(out.prev.poc) + thin, COLORS.poc);
+      lab("pocT", out.prev.poc, "PREV POC " + fmtL(out.prev.poc) + thin, COLORS.poc);
       items.push(ray("vahL", rayX0, out.prev.vah, COLORS.va, 1, 3));
-      lab("vahT", out.prev.vah, "VAH " + fmt(out.prev.vah), COLORS.va, FONT_SM);
+      lab("vahT", out.prev.vah, "VAH " + fmtL(out.prev.vah), COLORS.va, FONT_SM);
       items.push(ray("valL", rayX0, out.prev.val, COLORS.va, 1, 3));
-      lab("valT", out.prev.val, "VAL " + fmt(out.prev.val), COLORS.va, FONT_SM);
+      lab("valT", out.prev.val, "VAL " + fmtL(out.prev.val), COLORS.va, FONT_SM);
     }
 
     // ---- HVN / LVN node ticks, projected from the session start ----
@@ -1787,7 +1822,7 @@ class traderMachell {
         // rays get tested, and positional keys would swap identities
         items.push(ray("nk" + np.endTms, oldAnchor(np.endTms, "npoc"),
           np.poc, COLORS.naked, 1, 1));
-        lab("nkT" + np.endTms, np.poc, "NPOC " + fmt(np.poc), COLORS.nakedTxt, FONT_SM);
+        lab("nkT" + np.endTms, np.poc, "NPOC " + fmtL(np.poc), COLORS.nakedTxt, FONT_SM);
       }
     }
 
@@ -1795,11 +1830,11 @@ class traderMachell {
       const hx = Math.max(0, rayX0 - 40);
       items.push(ray("hpocL", hx, out.htf.poc, COLORS.htf, 3, 1));
       lab("hpocT", out.htf.poc,
-        "HTF POC " + fmt(out.htf.poc) + " (" + out.htf.sessions + "s)", COLORS.htf);
+        "HTF POC " + fmtL(out.htf.poc) + " (" + out.htf.sessions + "s)", COLORS.htf);
       items.push(ray("hvahL", hx, out.htf.vah, COLORS.htf, 1, 4));
-      lab("hvahT", out.htf.vah, "HTF VAH " + fmt(out.htf.vah), COLORS.htf, FONT_SM);
+      lab("hvahT", out.htf.vah, "HTF VAH " + fmtL(out.htf.vah), COLORS.htf, FONT_SM);
       items.push(ray("hvalL", hx, out.htf.val, COLORS.htf, 1, 4));
-      lab("hvalT", out.htf.val, "HTF VAL " + fmt(out.htf.val), COLORS.htf, FONT_SM);
+      lab("hvalT", out.htf.val, "HTF VAL " + fmtL(out.htf.val), COLORS.htf, FONT_SM);
     }
 
     // ---- ACCUM rotation: box + histogram + level ray ----
@@ -1837,7 +1872,7 @@ class traderMachell {
         ? "  \u25C0 " + ((out.tMs - out.accum.start) / 86400e3).toFixed(1) + "d"
         : "";
       lab("accT", out.accum.level,
-        "ACCUM " + fmt(out.accum.level) +
+        "ACCUM " + fmtL(out.accum.level) +
         (out.accum.short ? "  SELL retest" : "  BUY retest") +
         "  [+0.28R/75% n12]" + accAge, COLORS.accum);
     }
@@ -1846,7 +1881,7 @@ class traderMachell {
     if (out.leg) {
       items.push(ray("legL", rayX0, out.leg.level, COLORS.leg, 1, 1));
       lab("legT", out.leg.level,
-        "LEG " + fmt(out.leg.level) +
+        "LEG " + fmtL(out.leg.level) +
         (out.leg.down ? "  SELL retest" : "  BUY retest") + "  [untested]",
         COLORS.leg, FONT_SM);
     }
@@ -1881,8 +1916,8 @@ class traderMachell {
         { fontSize: 16, fontWeight: "bold" }, "centerMiddle"));
       if (today)
         items.push(txt("sg" + mk.tMs, mi, ev.entry,
-          (ev.long ? "  BUY " : "  SELL ") + ev.kind + " " + fmt(ev.entry) +
-          "  " + ev.tag + (ev.htf ? "  " + ev.htf : ""), col,
+          (ev.long ? "  BUY " : "  SELL ") + ev.kind + " " + fmtL(ev.entry) +
+          "  " + ev.tag + q + (ev.htf ? "  " + ev.htf : ""), col,
           ev.long ? -26 : 26, FONT_SM, "centerMiddle"));
       else if (O.history)
         items.push(txt("sg" + mk.tMs, mi, ev.entry,
@@ -1900,9 +1935,9 @@ class traderMachell {
     if (lastSig && lastSigIdx !== undefined) {
       const ev = lastSig.ev;
       items.push(ray("tpL", lastSigIdx, ev.tp, COLORS.tp, 2, 3));
-      lab("tpT", ev.tp, "TP " + fmt(ev.tp), COLORS.tp);
+      lab("tpT", ev.tp, "TP " + fmtL(ev.tp), COLORS.tp);
       items.push(ray("slL", lastSigIdx, ev.sl, COLORS.sl, 2, 2));
-      lab("slT", ev.sl, "SL " + fmt(ev.sl), COLORS.sl);
+      lab("slT", ev.sl, "SL " + fmtL(ev.sl), COLORS.sl);
     }
 
     // ---- alignment self-test (opt-in) ----
@@ -2023,7 +2058,14 @@ class traderMachell {
     }
     if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
     if (this.barMin !== 1)
-      ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min");
+      ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min; * marks " +
+        this.barMin + "-min-bin levels");
+    if (this.barMin > 30)
+      ctx.push("UNSUPPORTED TIMEFRAME - use 1M-30M (1M = graded basis)");
+    if (this._tfReset) {
+      if (this.tmsList.length > 50) this._tfReset = false;
+      else ctx.push("[timeframe changed - reloading]");
+    }
     if (!x0Ok) ctx.push("[anchor unresolved - profiles hidden]");
     if (this._overshoot) ctx.push("[anchor overshoot]");
     if (mism.size) ctx.push("[anchor mismatch: " + [...mism].sort().join(",") + "]");
@@ -2068,8 +2110,13 @@ class traderMachell {
       // platform's du() objects here, which are opaque on live -- the
       // "@undefined" readings in field report section 7 meant "cannot
       // introspect", NOT "suppressed". Fixed.)
+      // tf= settles elementSize semantics per timeframe in one screenshot
+      // (TIMEFRAME_ANCHORING_SPEC.md section 1.2)
+      const cd4 = this.chartDescription;
       items.push(frameTxt("stat4", 70, 72,
-        "anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
+        "tf=" + (cd4 ? cd4.underlyingType + "/" + cd4.elementSize : "none") +
+        " barMin=" + this.barMin +
+        " anchor=" + (x0Ok ? "ok@" + x0 : "MISS") +
         " i=" + i + " base=" + this.idxBase + " mirror=" + this.tmsList.length +
         " gap=" + (this.mirrorGapped ? 1 : 0) +
         " desync=" + (this._desync ? 1 : 0) +
