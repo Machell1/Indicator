@@ -86,11 +86,57 @@ Interim: leave AUTO alone. `duTime=1` would fix the break but would
 break the genuine weekend pre-open case, which is the one `[du]` was
 Saturday-proven for. The break is one hour a day and not a trading hour.
 
-## Verification still owed
+## VERIFIED AT THE REOPEN — DIAGNOSIS CONFIRMED END TO END
 
-The reopen at 17:00 CT should flip the banner back to `[t-du]` and bring
-every label back in place with no other change. If it does, this
-diagnosis is confirmed end to end without any dialog interaction.
+No dialog interaction was needed. Timeline, all read off the banner:
+
+- **17:02:41** — trading restarted, ticks flowing (LAST 4449.3), but the
+  banner **still read `[du]` and labels were still gone**.
+- **17:05:26** — banner flipped to **`[t-du]`** and **every label
+  returned, correctly placed** right of the live edge.
+- **17:06:24** — stable and clean.
+
+**That 3-minute lag is itself a refinement of the diagnosis, and it
+rules out coincidence.** The gate reads `lastPushedMs` — the last
+*committed* bar, not the last tick. At 17:02 the 17:00-17:05 bar was
+still developing, so the newest committed bar was 15:55, ~67 min stale.
+The flip could not happen until that bar **closed at 17:05**, and it
+happened within seconds of it. The banner marker, the label
+disappearance and the label return all move together with a mechanism
+that predicts the timing to the minute in both directions.
+
+Corollary for whoever writes the fix: **freshness is measured in
+committed bars, so the effective blind window is `3 x barMin` PLUS up to
+one whole bar period.** On 30M that is a worst case of ~2 hours.
+
+### Two cosmetic findings in the confirmed frame (not blockers)
+
+1. **Duplicate adjacent labels.** The per-session MP_55396 key-values
+   (white, at the profile's right edge) now land immediately left of the
+   main label column, so the same numbers render twice, touching:
+   `POC 4393.2*PREV POC 4393.2*` and `VAH 4414.8*VAH 4414.8*`. This will
+   recur every session now that the developing profile spans the session
+   (v10.1), because the profile edge and the `i + 4` column coincide.
+   Either suppress the per-session key-values for the CURRENT session
+   (the label column already states them) or push the column right.
+2. **ACCUM label clips the right edge** — `ACCUM 4407.3* BUY retest
+   [+0.28R/75% n12]` runs past the chart boundary and loses its tail.
+
+### Session roll behaved correctly
+
+The 17:00 ET roll fired during the break exactly as `sessionKey` should:
+PREV POC moved 4407.9 -> **4393.2**, VAH 4432.4 -> 4414.8, VAL 4352.5 ->
+4380.7. The session that closed at 16:00 CT is now `prev`. No drift, no
+stale carry.
+
+### Frame-capture caution (repeat of an earlier lesson)
+
+A zoom taken seconds after the confirming screenshot showed the labels
+absent again and briefly looked like a flicker. A fresh full capture
+showed them present. **It was a partially-repainted frame** — the same
+artifact that produced a withdrawn observation earlier in this project.
+Rule stands: never call a rendering fault from a single zoom; confirm on
+a full capture.
 
 Account: position 0, equity 98,919.41 unchanged. No chart-canvas clicks;
 the only click was the panel-header gear, which turned out to be
