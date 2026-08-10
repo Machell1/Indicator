@@ -145,3 +145,67 @@ Position 0, equity 98,919.41 unchanged. All dialog interaction went
 through the Elements panel with a screenshot verification before every
 click inside the dialog (the process rule added after the section 7
 order-bubble incident) — no chart-canvas clicks.
+
+---
+
+# section 10 — v10.1 FULL MIGRATION LIVE (2026-08-10 13:55-14:00 CDT)
+
+Deployed the full row migration and ran the deliberate 5M smoothness
+pass Cursor asked for.
+
+## 1M — CLEAN
+
+Full translucent developing profile spanning the session, candles
+readable throughout, all structure intact: banner, `HTF: n/a - 2/5
+sessions loadable here (read HTF on 30M)`, PREV POC 4407.9 unstarred,
+dVAH 4411.6 / dPOC 4394.8 / dVAL 4381.5, VA bracket, `[t-du]`, no
+`[oversize item]`. rowOpacity 20 default reads correctly.
+
+## 5M PAN/ZOOM PASS — no hangs, but read the caveat
+
+Four full-width drags (both directions) plus repaints at 5M with the
+deepest history and every family migrated. **No renderer hangs, no
+screenshot timeouts, no stalled repaints** — each pan completed and
+redrew correctly, and the HTF composite populated (`HTF POC 4136.6`,
+`HTF: above value`). Compare against earlier in this project where the
+renderer genuinely froze and CDP screenshot calls timed out; nothing of
+that kind occurred here.
+
+**Honest limit on this result:** discrete screenshots cannot measure
+frame rate during a drag. What is verified is "no hangs, correct
+redraw"; true perceived smoothness is a human judgment and the trader
+should do one deliberate pan himself before this is called settled.
+
+## NEW COSMETIC FINDING — translucent blocks stack at coarse timeframes
+
+At 5M with ~6 sessions in view, the now-translucent row blocks from
+adjacent sessions OVERLAP each other, and overlapping translucency
+compounds: the chart reads as a patchwork of coloured slabs (magenta,
+navy, olive) behind price. Candles remain visible — the occlusion fix
+holds — but the composite is visually noisy in a way the opaque gauges
+were not, because opaque gauges were narrow and these fill their
+sessions.
+
+This is the flip side of closing the width inconsistency: full-width
+profiles at every timeframe means neighbouring sessions now share
+screen space. Suggestions (not prescriptions):
+- scale `rowOpacity` down as the count of VISIBLE sessions rises, so
+  6 stacked sessions do not sum to an opaque wash;
+- or reduce the finalized-session fill fraction while keeping the
+  DEVELOPING profile full-width (the developing one is what the trader
+  reads intraday; history only needs to be legible, not prominent);
+- or cap rendered sessions by visible span rather than a fixed count.
+
+Recommend tuning against a 5M screenshot the same way the label pitch
+was tuned against the section 8 frame.
+
+## Deferred this pass
+
+`hpro@/apro@/accB@` telemetry capture and the 30M label-stack acceptance
+check were NOT done — the settings dialog was already opened several
+times during live RTH for the vaFill calibration, and further dialog
+work during the session was judged not worth the risk. Both remain
+queued for a quiet moment.
+
+Account: position 0, equity 98,919.41 unchanged. Chart restored to 1M at
+the live edge.
