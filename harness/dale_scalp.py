@@ -51,7 +51,7 @@ ROT_MIN_BARS  = 30
 ROT_MAX_ATR   = 1.5
 ROT_BREAK_ATR = 1.0
 
-GC_COST  = 0.05
+GC_COST  = float(os.environ.get("COST_PTS", "0.05"))
 MGC_COST = 0.11
 
 NY_START, NY_END = 9, 11
@@ -231,7 +231,7 @@ def show(label, rs, held, seed=7):
 
 
 def main():
-    files = sorted(glob.glob(os.path.join("..", "data_tv", "TV_*_1min.csv")))
+    files = sorted(glob.glob(os.environ.get("DATA_GLOB", os.path.join("..", "data_tv", "TV_*_1min.csv"))))
     stack_by_day, accum_by_day = {}, {}
     sessions = 0
 
