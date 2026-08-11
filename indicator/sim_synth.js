@@ -1766,6 +1766,63 @@ if (aln.length) {
   console.log('part21 anchor-free levels:  observed barMin (a-c), full-width family, bidx OK');
 }
 
+// -- part 22: v12 right-edge pinned live profile (HANDOFF_v12). The
+// structural invariant that IS the feature: no X coordinate or width in
+// this family may carry unit du -- time-axis independence is enforced by
+// the sim, not promised in review. Plus: grid-right container shape,
+// session-keyed, offset applied, survives the emitted-geometry scan,
+// duTime cannot move it, purely additive, default ON. --
+{
+  const R22 = runModel('A', 400, { htfSessions: 20 });   // edgeProfile default ON
+  const iLast = n - 1;
+  const it22 = R22.lastResult.graphics.items;
+  const cont = it22.find(x => x.tag === 'Container' && x.key.startsWith('edge'));
+  check(!!cont, 'part22: edge profile container missing');
+  if (cont) {
+    check(cont.key === 'edge' + R22.inst.lastOut.dayStartTms,
+      'part22: not session-keyed (A8 rule)');
+    check(cont.origin && cont.origin.cs === 'grid' && cont.origin.h === 'right',
+      'part22: not grid-right pinned');
+    let rects = 0, pocSeen = false;
+    for (const ch of cont.children) {
+      if (ch.tag === 'Shapes') {
+        for (const pr of ch.primitives) {
+          rects++;
+          check(pr.position.x.unit === 'px' && pr.size.width.unit === 'px',
+            'part22: du leaked into an X coordinate/width');
+          check(pr.position.x.v === -170, 'part22: edgeOffset not applied: ' + pr.position.x.v);
+          check(pr.size.width.v < 0, 'part22: rows not growing left');
+          check(pr.position.y.unit === 'du' && pr.size.height.unit === 'du',
+            'part22: y must stay price-space du');
+          if (ch.key.endsWith('P')) pocSeen = true;
+        }
+      } else if (ch.tag === 'Text') {
+        check(ch.point.x.unit === 'px', 'part22: label x not px');
+        check(/[*]?$/.test(ch.text) && /(VAH|POC|VAL) /.test(ch.text),
+          'part22: key-row label malformed: ' + ch.text);
+      }
+    }
+    check(rects > 0 && pocSeen, 'part22: rows/POC missing');
+    check(cont.children.filter(ch => ch.tag === 'Text').length === 3,
+      'part22: expected exactly 3 key-row labels');
+  }
+  // duTime cannot move it: force minute-slot mode, compare the container
+  const inst22 = R22.inst;
+  inst22.props = Object.assign({}, inst22.props, { duTime: '1' });
+  const itT = inst22.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  const contT = itT.find(x => x.tag === 'Container' && x.key.startsWith('edge'));
+  check(!!contT && JSON.stringify(contT) === JSON.stringify(cont),
+    'part22: duTime moved the edge profile -- independence broken');
+  // purely additive: toggling off removes ONLY the edge family
+  inst22.props = Object.assign({}, inst22.props, { duTime: '0', edgeProfile: '0' });
+  const itOff = inst22.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  check(itOff.every(x => !x.key.startsWith('edge')), 'part22: toggle off failed');
+  const keysOn = itT.filter(x => !x.key.startsWith('edge')).map(x => x.key).sort().join();
+  const keysOff = itOff.map(x => x.key).sort().join();
+  check(keysOn === keysOff, 'part22: not purely additive (other layers changed)');
+  console.log('part22 edge profile:        px-only X, pinned, session-keyed, duTime-immune, additive OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

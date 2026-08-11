@@ -1,7 +1,7 @@
 /*
  * TraderMachell -- Tradovate custom indicator
  * Dale volume-profile model with backtest-earned evidence tags.
- * Generated 2026-08-10 by build.js -- do not edit by hand;
+ * Generated 2026-08-11 by build.js -- do not edit by hand;
  * edit dale_core.js / wrapper.js and rebuild.
  *
  * Core math is regression-verified: identical POC/VAH/VAL to the Python
@@ -1249,6 +1249,9 @@ class traderMachell {
       duMode: pBool(p.scaledWidths, true),   // du widths live-proven 2026-08-09
       dev: pBool(p.devProfile, true),        // developing session profile (SVP)
       rowsPlot: pBool(p.rowsPlot, true),     // translucent plotter rows (v10)
+      edge: pBool(p.edgeProfile, true),      // right-edge pinned live profile (v12)
+      edgeW: pNum(p.edgeWidth, 140),         // edge profile max row width, px
+      edgeOff: Number.isFinite(Number(p.edgeOffset)) ? Number(p.edgeOffset) : 170,
       nodes: pBool(p.nodes, true),           // HVN/LVN ticks on the prior profile
       history: pBool(p.showHistory, false),
       alignTest: pBool(p.alignTest, false),
@@ -1859,7 +1862,10 @@ class traderMachell {
         // DROPPED at multi-session density (section 7 label collisions):
         // when sessions are shorter than ~150 bars (15M/30M), adjacent
         // stacks overprint; the right-edge column still carries levels
-        if (sess.bars.length >= 150)
+        // v12 cosmetic (HANDOFF carried item 1): the NEWEST finalized
+        // session's key values ARE the main column's PREV levels --
+        // suppress that one stack to stop the adjacent duplication
+        if (sess.bars.length >= 150 && sess !== sessions[sessions.length - 1])
           items.push(...layoutLabels([
             { key: K + "TH", price: mp.vah, text: "VAH " + fmtL(mp.vah), color: "#FFFFFF", font: FONT_XS },
             { key: K + "TP", price: mp.poc, text: "POC " + fmtL(mp.poc), color: "#FFFFFF", font: FONT_XS },
@@ -2106,6 +2112,67 @@ class traderMachell {
       lab("tpT", ev.tp, "TP " + fmtL(ev.tp), COLORS.tp);
       items.push(ray("slL", lastSigIdx, ev.sl, COLORS.sl, 2, 2));
       lab("slT", ev.sl, "SL " + fmtL(ev.sl), COLORS.sl);
+    }
+
+    // ---- v12: right-edge pinned LIVE-SESSION profile (HANDOFF_v12,
+    // trader-approved, ADDITIVE) ----
+    // Pinned to the pane's right edge via a grid-right container: the
+    // VZO-proven combination for price-space rows with viewport-pinned
+    // x. Every X coordinate/width in this family is PX -- it carries no
+    // time information, so no prepend, re-index, minute-slot mapping or
+    // duTime change can move it (duX is never called here). Y stays
+    // price-space du(price), which the transform never touches -- the
+    // rows must ride the shared price scale (open question 1: rows land
+    // at true prices and CLIP when the viewport shows a narrow band;
+    // compressing would fake the scale and slicing needs viewport data
+    // the platform does not expose). Opaque by design: it sits in the
+    // empty future grid with no candles to occlude (spec rationale).
+    // edgeOffset (default 170px) seats it inboard of the trader's
+    // VZOProfile_Customizable at 150px (open question 2). INSURANCE,
+    // NOT A FIX: the daily-break AUTO flip still mis-places du-anchored
+    // layers ~1h/day; deleting AUTO mode stays open pending the
+    // 16:00-17:00 CT calib measurement.
+    if (O.edge) {
+      const devE = dev || this._devProfile(out);
+      if (devE) {
+        const KE = "edge" + out.dayStartTms;   // A8 rule: session-keyed
+        const W = Math.max(20, O.edgeW);
+        const offE = Math.max(0, O.edgeOff);
+        const g = { main: [], va: [], poc: [] };
+        for (const r of devE.rows) {
+          if (!(r.frac > 0) || !(r.h > 0)) continue;
+          const h = r.h * VIS.rowFill;
+          const pLo = r.price - h / 2, pHi = r.price + h / 2;
+          (r.isPoc ? g.poc : (r.inVA ? g.va : g.main)).push({
+            tag: "Rectangle",
+            position: { x: px(-offE),
+              y: du(RECT_Y_ANCHOR === "bottom" ? pLo : pHi) },
+            size: { width: px(-Math.max(2, Math.round(r.frac * W))),
+              height: du(h) } });
+        }
+        const kids = [];
+        if (g.main.length) kids.push({ tag: "Shapes", key: KE + "M",
+          global: true, primitives: g.main, fillStyle: { color: COLORS.profile } });
+        if (g.va.length) kids.push({ tag: "Shapes", key: KE + "V",
+          global: true, primitives: g.va, fillStyle: { color: COLORS.profileVA } });
+        if (g.poc.length) kids.push({ tag: "Shapes", key: KE + "P",
+          global: true, primitives: g.poc, fillStyle: { color: COLORS.dev } });
+        // key rows carry their prices (dev.rows keep only display
+        // fractions by design, so per-row volume text is not available
+        // without computing a second profile -- which the spec forbids);
+        // leftMiddle extends the text LEFT of its point, into the empty
+        // grid beside the row tips
+        const eTxt = (sfx, price, txt2) => kids.push({ tag: "Text",
+          key: KE + sfx, global: true,
+          point: { x: px(-(offE + W + 4)), y: du(price) },
+          text: txt2, style: { fontSize: 10, fontWeight: "bold", fill: "#FFFFFF" },
+          textAlignment: "leftMiddle" });
+        eTxt("TH", devE.vah, "VAH " + fmtL(devE.vah));
+        eTxt("TP", devE.poc, "POC " + fmtL(devE.poc));
+        eTxt("TL", devE.val, "VAL " + fmtL(devE.val));
+        items.push({ tag: "Container", key: KE, global: true,
+          origin: { cs: "grid", h: "right", v: "top" }, children: kids });
+      }
     }
 
     // ---- alignment self-test (opt-in) ----
@@ -2459,6 +2526,9 @@ module.exports = {
       : predef.paramSpecs.number(0, 1, 0),
     vaFillOpacity: predef.paramSpecs.number(14, 1, 0),// band opacity 0..100 (14 = trader-calibrated live; 80 = "is it drawing at all?" probe)
     rowsPlot: predef.paramSpecs.number(1, 1, 0),      // 1 = developing rows translucent via plotter, day-wide (v10); 0 = v9.3 opaque 150-bar rows
+    edgeProfile: predef.paramSpecs.number(1, 1, 0),   // 1 = right-edge pinned live-session profile (v12, time-axis-free)
+    edgeWidth: predef.paramSpecs.number(140, 10, 20), // edge profile max row width, px
+    edgeOffset: predef.paramSpecs.number(170, 10, 0), // px inboard from the pane edge (sits left of the community VZO at 150)
     rowOpacity: predef.paramSpecs.number(20, 1, 0),   // row opacity 0..100 (first guess -- calibrate live like the band)
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
