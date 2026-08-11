@@ -1,0 +1,505 @@
+//@version=6
+// ============================================================================
+// TraderMachell — Dale Volume-Profile Model
+// Port of the graded engine (harness/dale_v5.py + dale_tv.py).
+//
+// build_profile() mirrored: fixed grid, gridLo = sessionLow - 40*step, every
+// bar spreads its volume evenly across the bins its range covers, POC =
+// densest bin, value area grows from the POC taking the larger neighbour
+// until 70% of session volume is enclosed.
+//
+// MEASURED, GCQ6, 86 liquid sessions, Mar-Aug 2026 (gold only):
+//   ACCUM rotation retest  +0.282R  75% win  n=12  <- no delta term, travels
+//   Prior-POC stack        +0.403R  80% win  n=10  <- measured on
+//        upVolume-downVolume, which no live platform computes. UNGRADED here.
+//   LEG cluster            0 fires in 86 sessions  <- unreachable, omitted
+// Holds 30-75 min (median 43), structural stops 12-21 pts. Not a scalper.
+//
+// The SCORE is a CONFLUENCE score, not a win probability. Components are
+// printed. The measured win rate is shown separately and never blended in.
+// ============================================================================
+
+indicator("TraderMachell — Dale Volume-Profile Model", "TraderMachell", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ─────────────────────────────────────────────────────── inputs
+gP = "① Profiles"
+rows     = input.int(80, "Profile resolution (rows)", minval = 20, maxval = 160, group = gP)
+vaIn     = input.float(70, "Value area %", minval = 50, maxval = 90, group = gP)
+showPrev = input.bool(true, "Prior session  POC / VAH / VAL", group = gP)
+showDev  = input.bool(true, "Developing session  POC / VAH / VAL", group = gP)
+showNPOC = input.bool(true, "Naked (untested) POCs", group = gP)
+nakedMax = input.int(6, "  how many to keep", minval = 1, maxval = 20, group = gP)
+
+gF = "② Flexible profile (ACCUM rotation)"
+showFlex = input.bool(true, "Draw the rotation's volume profile", group = gF)
+flexRows = input.int(40, "  histogram rows", minval = 10, maxval = 80, group = gF)
+flexW    = input.int(60, "  width (bars)", minval = 10, maxval = 200, group = gF)
+rotBars  = input.int(30, "Rotation: min length (bars)", minval = 10, group = gF)
+rotMaxA  = input.float(1.5, "Rotation: max height (ATR)", step = 0.1, group = gF)
+rotBrkA  = input.float(1.0, "Breakout: min extension (ATR)", step = 0.1, group = gF)
+
+gS = "③ Signals"
+useAccum = input.bool(true, "ACCUM rotation retest   [graded +0.28R/75% n12]", group = gS)
+useStack = input.bool(true, "Prior-POC stack         [UNGRADED on this delta]", group = gS)
+absVolX  = input.float(1.3, "Absorption: volume >= median x", step = 0.1, group = gS)
+absRngX  = input.float(0.9, "Absorption: range <= median x", step = 0.1, group = gS)
+nearATR  = input.float(0.30, "Touch proximity (ATR)", step = 0.05, group = gS)
+iniPct   = input.int(75, "Initiative: |delta| percentile", minval = 50, maxval = 95, group = gS)
+absWin   = input.int(15, "Absorption window (min)", minval = 1, group = gS)
+iniWin   = input.int(5, "Initiative window (min)", minval = 1, group = gS)
+rearmATR = input.float(0.5, "Re-arm distance (ATR)", step = 0.1, group = gS)
+minScore = input.int(0, "Only show entries scoring >=", minval = 0, maxval = 100, group = gS)
+
+gT = "④ Trade"
+tpR      = input.float(2.0, "Target (R multiple)", step = 0.25, group = gT)
+showRisk = input.bool(true, "Draw stop / target", group = gT)
+
+gV = "⑤ Appearance"
+cPoc  = input.color(#F0B429, "Prior POC", group = gV)
+cVa   = input.color(#7C93A8, "Prior VA", group = gV)
+cDev  = input.color(#2DA88F, "Developing", group = gV)
+cNak  = input.color(#9B7ED8, "Naked POC", group = gV)
+cAcc  = input.color(#4FA3D1, "ACCUM level", group = gV)
+cLong = input.color(#26A17B, "Long", group = gV)
+cShrt = input.color(#E05260, "Short", group = gV)
+cStop = input.color(#7A6060, "Stop", group = gV)
+showTbl = input.bool(true, "Status panel", group = gV)
+
+vaPct = vaIn / 100.0
+
+// ─────────────────────────────────────── delta (Level 1 is enough)
+lowTf = timeframe.period == "1" ? "1S" : "1"
+[lV, lO, lC] = request.security_lower_tf(syminfo.tickerid, lowTf, [volume, open, close])
+
+f_delta() =>
+    float d = 0.0
+    bool real = false
+    if array.size(lV) > 0
+        real := true
+        for i = 0 to array.size(lV) - 1
+            float v = array.get(lV, i)
+            float o = array.get(lO, i)
+            float c = array.get(lC, i)
+            d += c > o ? v : c < o ? -v : 0.0
+    else
+        float rg = high - low
+        d := rg > 0 ? volume * (2.0 * (close - low) / rg - 1.0) : 0.0
+    [d, real]
+
+[dlt, deltaReal] = f_delta()
+
+// ─────────────────────────────────────── profile engine (global scope)
+f_profile(hs, ls, vs, nrows) =>
+    float poc = na
+    float vah = na
+    float val = na
+    float gridLo = na
+    float step = na
+    array<float> bins = array.new_float(0)
+    int n = array.size(ls)
+    if n > 5
+        float lo = array.min(ls)
+        float hi = array.max(hs)
+        step := math.max((hi - lo) / nrows, syminfo.mintick)
+        gridLo := lo - 40 * step
+        int nb = nrows + 90
+        bins := array.new_float(nb, 0.0)
+        float tot = 0.0
+        for i = 0 to n - 1
+            int a = math.max(int((array.get(ls, i) - gridLo) / step), 0)
+            int z = math.min(math.max(int((array.get(hs, i) - gridLo) / step), a), nb - 1)
+            float sh = array.get(vs, i) / (z - a + 1)
+            for k = a to z
+                array.set(bins, k, array.get(bins, k) + sh)
+            tot += array.get(vs, i)
+        if tot > 0
+            int pr = array.indexof(bins, array.max(bins))
+            poc := gridLo + (pr + 0.5) * step
+            float need = tot * vaPct
+            float acc = array.get(bins, pr)
+            int up = pr
+            int dn = pr
+            while acc < need
+                float a2 = up + 1 < nb ? array.get(bins, up + 1) : 0.0
+                float b2 = dn - 1 >= 0 ? array.get(bins, dn - 1) : 0.0
+                if a2 <= 0 and b2 <= 0
+                    break
+                if a2 >= b2
+                    up += 1
+                    acc += a2
+                else
+                    dn -= 1
+                    acc += b2
+            vah := gridLo + (up + 1) * step
+            val := gridLo + dn * step
+    [poc, vah, val, gridLo, step, bins]
+
+f_mean(a) =>
+    float s = 0.0
+    int n = array.size(a)
+    if n > 0
+        for i = 0 to n - 1
+            s += array.get(a, i)
+    n > 0 ? s / n : na
+
+f_pct(a, p) =>
+    float r = na
+    int n = array.size(a)
+    if n > 4
+        array<float> c = array.copy(a)
+        array.sort(c, order.ascending)
+        r := array.get(c, math.min(n - 1, int(n * p / 100.0)))
+    r
+
+f_bars(mins) =>
+    math.max(1, int(mins / math.max(1, timeframe.in_seconds() / 60)))
+
+// ─────────────────────────────────────── session buffers
+newSess = ta.change(time("D")) != 0
+
+var array<float> sH = array.new_float()
+var array<float> sL = array.new_float()
+var array<float> sV = array.new_float()
+var array<float> sR = array.new_float()
+var array<float> sD = array.new_float()
+var array<float> nakeds = array.new_float()
+
+var float pPoc = na
+var float pVah = na
+var float pVal = na
+var float dPoc = na
+var float dVah = na
+var float dVal = na
+var int sCount = 0
+
+if newSess and array.size(sL) > 5
+    [p1, a1, v1, g1, s1, b1] = f_profile(sH, sL, sV, rows)
+    if not na(p1)
+        if not na(pPoc)
+            array.push(nakeds, pPoc)
+            while array.size(nakeds) > nakedMax
+                array.shift(nakeds)
+        pPoc := p1
+        pVah := a1
+        pVal := v1
+    array.clear(sH)
+    array.clear(sL)
+    array.clear(sV)
+    array.clear(sR)
+    array.clear(sD)
+    sCount := 0
+
+array.push(sH, high)
+array.push(sL, low)
+array.push(sV, volume)
+array.push(sR, high - low)
+array.push(sD, dlt)
+sCount += 1
+
+if showNPOC and array.size(nakeds) > 0
+    for i = array.size(nakeds) - 1 to 0
+        if i < array.size(nakeds)
+            float lv = array.get(nakeds, i)
+            if low <= lv and high >= lv
+                array.remove(nakeds, i)
+
+if showDev and sCount > 30 and bar_index % 10 == 0
+    [p2, a2, v2, g2, s2, b2] = f_profile(sH, sL, sV, rows)
+    dPoc := p2
+    dVah := a2
+    dVal := v2
+
+// ─────────────────────────────────────── session statistics
+float atrV = na
+if array.size(sR) > 0
+    atrV := f_mean(sR) * 30.0
+
+float vMed = array.size(sV) > 4 ? array.median(sV) : na
+float rMed = array.size(sR) > 4 ? array.median(sR) : na
+
+var array<float> absD = array.new_float()
+array.clear(absD)
+if array.size(sD) > 0
+    for i = 0 to array.size(sD) - 1
+        array.push(absD, math.abs(array.get(sD, i)))
+float dP = f_pct(absD, iniPct)
+
+// ─────────────────────────────────────── rotation → flexible profile
+var float rotHi = na
+var float rotLo = na
+var int rotS = na
+var int rotE = na
+var bool rotUp = false
+var float accLvl = na
+var float accStop = na
+var int accBar = na
+var bool accArmed = false
+var bool accWasOut = false
+var float accMaxD = 0.0
+var float fGrid = na
+var float fStep = na
+var array<float> fBins = array.new_float(0)
+var array<float> fH = array.new_float()
+var array<float> fL = array.new_float()
+var array<float> fV = array.new_float()
+
+if not na(atrV) and atrV > 0 and bar_index > rotBars + 5 and barstate.isconfirmed
+    float wHi = ta.highest(high, rotBars)
+    float wLo = ta.lowest(low, rotBars)
+    if na(rotS) and (wHi - wLo) <= rotMaxA * atrV
+        rotS := bar_index - rotBars + 1
+        rotE := bar_index
+        rotHi := wHi
+        rotLo := wLo
+    else if not na(rotS) and na(accLvl)
+        float nH = math.max(rotHi, high)
+        float nL = math.min(rotLo, low)
+        if (nH - nL) <= rotMaxA * atrV
+            rotHi := nH
+            rotLo := nL
+            rotE := bar_index
+        else
+            bool up = close > rotHi + 0.2 * atrV
+            bool dn = close < rotLo - 0.2 * atrV
+            float ext = up ? high - rotHi : dn ? rotLo - low : 0.0
+            if (up or dn) and ext >= rotBrkA * atrV and rotE > rotS + 5
+                array.clear(fH)
+                array.clear(fL)
+                array.clear(fV)
+                int b0 = math.min(bar_index - rotS, 480)
+                int b1 = math.max(bar_index - rotE, 0)
+                for i = b1 to b0
+                    array.push(fH, high[i])
+                    array.push(fL, low[i])
+                    array.push(fV, volume[i])
+                [fp, fa, fv, fg, fs, fb] = f_profile(fH, fL, fV, flexRows)
+                if not na(fp)
+                    accLvl := fp
+                    rotUp := up
+                    accBar := bar_index
+                    accStop := up ? fv - 0.60 * atrV : fa + 0.60 * atrV
+                    fGrid := fg
+                    fStep := fs
+                    fBins := fb
+                    accArmed := false
+                    accWasOut := false
+                    accMaxD := 0.0
+            else if not (up or dn)
+                rotS := na
+
+// ─────────────────────────────────────── signal state
+var bool armed = true
+var int tchB = na
+var bool isLong = false
+var bool absOn = false
+var int absB = na
+var float runX = na
+
+var float ePx = na
+var float eSl = na
+var float eTp = na
+var int eBar = na
+var bool eLong = false
+var int eScore = 0
+var string eKind = ""
+var string eWhy = ""
+var string status = "waiting for a session profile"
+
+bool sigUp = false
+bool sigDn = false
+
+f_score(isAccum, lvl, volX, dX, rPts) =>
+    int sc = isAccum ? 30 : 12
+    string why = isAccum ? "graded+30" : "ungraded+12"
+    bool conf = false
+    if not na(pPoc) and not na(atrV)
+        conf := math.abs(lvl - pPoc) < 0.30 * atrV
+    if not conf and array.size(nakeds) > 0 and not na(atrV)
+        for i = 0 to array.size(nakeds) - 1
+            if math.abs(lvl - array.get(nakeds, i)) < 0.30 * atrV
+                conf := true
+    if conf
+        sc += 20
+        why += " conflu+20"
+    float aS = math.min(math.max((volX - absVolX) / absVolX, 0.0), 1.0)
+    sc += int(15 * aS)
+    why += " abs+" + str.tostring(int(15 * aS))
+    float iS = math.min(math.max(dX - 1.0, 0.0), 1.0)
+    sc += int(15 * iS)
+    why += " init+" + str.tostring(int(15 * iS))
+    if rPts > 0 and not na(atrV) and rPts < 2.2 * atrV
+        sc += 10
+        why += " R-ok+10"
+    int nyMin = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+    if isAccum and nyMin >= 540 and nyMin < 660
+        sc += 10
+        why += " NY+10"
+    [math.min(sc, 100), why]
+
+// ---- ACCUM retest
+if useAccum and not na(accLvl) and not na(atrV) and barstate.isconfirmed
+    float dd = math.abs(close - accLvl)
+    accMaxD := math.max(accMaxD, dd)
+    if dd > 0.10 * atrV
+        accWasOut := true
+    if not accArmed and accMaxD >= 1.0 * atrV
+        accArmed := true
+    bool tch = rotUp ? low <= accLvl : high >= accLvl
+    if accArmed and accWasOut and tch
+        float volX = na(vMed) ? 1.0 : volume / vMed
+        float dX = na(dP) or dP == 0 ? 1.0 : math.abs(dlt) / dP
+        float rr = math.abs(close - accStop)
+        [sc, why] = f_score(true, accLvl, volX, dX, rr)
+        if sc >= minScore and rr > 0
+            eLong := rotUp
+            ePx := close
+            eSl := accStop
+            eTp := rotUp ? close + tpR * rr : close - tpR * rr
+            eBar := bar_index
+            eScore := sc
+            eWhy := why
+            eKind := "ACCUM"
+            sigUp := rotUp
+            sigDn := not rotUp
+            status := "ACCUM retest — " + (rotUp ? "LONG" : "SHORT") + "  score " + str.tostring(sc)
+        accArmed := false
+        accWasOut := false
+        accMaxD := 0.0
+
+// ---- prior-POC stack
+if useStack and not na(pPoc) and not na(atrV) and not na(vMed) and not na(rMed) and not na(dP) and barstate.isconfirmed
+    if not armed and math.abs(close - pPoc) >= rearmATR * atrV
+        armed := true
+        tchB := na
+        absOn := false
+        status := "armed — level vacated, watching for the retest"
+    if armed and low <= pPoc and high >= pPoc and na(tchB)
+        tchB := bar_index
+        isLong := close[1] > pPoc
+        armed := false
+        absOn := false
+        runX := isLong ? low : high
+        status := (isLong ? "LONG" : "SHORT") + " touch — waiting for absorption"
+    if not na(tchB)
+        runX := isLong ? math.min(runX, low) : math.max(runX, high)
+        if not absOn and bar_index - tchB <= f_bars(absWin)
+            bool holds = isLong ? low > pPoc - nearATR * atrV : high < pPoc + nearATR * atrV
+            if volume >= absVolX * vMed and (high - low) <= absRngX * rMed and holds
+                absOn := true
+                absB := bar_index
+                status := (isLong ? "LONG" : "SHORT") + " absorption — waiting for initiative"
+        if absOn and bar_index - absB <= f_bars(iniWin)
+            if math.abs(dlt) >= dP and (isLong ? dlt > 0 : dlt < 0)
+                float st = isLong ? runX - 0.10 * atrV : runX + 0.10 * atrV
+                float rr2 = math.abs(close - st)
+                [sc2, why2] = f_score(false, pPoc, volume / vMed, math.abs(dlt) / dP, rr2)
+                if sc2 >= minScore and rr2 > 0
+                    eLong := isLong
+                    ePx := close
+                    eSl := st
+                    eTp := isLong ? close + tpR * rr2 : close - tpR * rr2
+                    eBar := bar_index
+                    eScore := sc2
+                    eWhy := why2
+                    eKind := "STACK"
+                    sigUp := isLong
+                    sigDn := not isLong
+                    status := (isLong ? "LONG" : "SHORT") + " ENTRY — score " + str.tostring(sc2)
+                tchB := na
+                absOn := false
+        if not na(tchB) and bar_index - tchB > f_bars(absWin) and not absOn
+            tchB := na
+            status := "stood down — touch had no absorption signature"
+        else if absOn and not na(absB) and bar_index - absB > f_bars(iniWin)
+            absOn := false
+            tchB := na
+            status := "stood down — absorption never drew initiative"
+
+// ─────────────────────────────────────── drawing
+plot(showPrev ? pPoc : na, "PREV POC", cPoc, 2, plot.style_linebr)
+plot(showPrev ? pVah : na, "PREV VAH", cVa, 1, plot.style_linebr)
+plot(showPrev ? pVal : na, "PREV VAL", cVa, 1, plot.style_linebr)
+plot(showDev ? dPoc : na, "dPOC", cDev, 1, plot.style_linebr)
+plot(showDev ? dVah : na, "dVAH", color.new(cDev, 50), 1, plot.style_linebr)
+plot(showDev ? dVal : na, "dVAL", color.new(cDev, 50), 1, plot.style_linebr)
+plot(useAccum ? accLvl : na, "ACCUM", cAcc, 2, plot.style_linebr)
+
+var array<line> nkL = array.new<line>()
+var array<label> nkT = array.new<label>()
+
+f_tag(p, s, c) =>
+    if not na(p)
+        array.push(nkT, label.new(bar_index + 15, p, s + " " + str.tostring(p, format.mintick), style = label.style_label_left, color = color.new(#12161C, 20), textcolor = c, size = size.tiny))
+
+if barstate.islast
+    while array.size(nkL) > 0
+        line.delete(array.pop(nkL))
+    while array.size(nkT) > 0
+        label.delete(array.pop(nkT))
+    if showNPOC and array.size(nakeds) > 0
+        for i = 0 to array.size(nakeds) - 1
+            float lv = array.get(nakeds, i)
+            array.push(nkL, line.new(bar_index - 300, lv, bar_index + 15, lv, color = color.new(cNak, 35), style = line.style_dotted, width = 1))
+            f_tag(lv, "NPOC", cNak)
+    if showPrev
+        f_tag(pPoc, "PREV POC", cPoc)
+        f_tag(pVah, "VAH", cVa)
+        f_tag(pVal, "VAL", cVa)
+    if showDev
+        f_tag(dPoc, "dPOC", cDev)
+        f_tag(dVah, "dVAH", cDev)
+        f_tag(dVal, "dVAL", cDev)
+    if useAccum
+        f_tag(accLvl, "ACCUM", cAcc)
+
+var array<box> fBox = array.new<box>()
+if showFlex and barstate.islast
+    while array.size(fBox) > 0
+        box.delete(array.pop(fBox))
+    if array.size(fBins) > 0 and not na(fGrid) and not na(fStep) and not na(accBar)
+        float mx = array.max(fBins)
+        if mx > 0
+            for k = 0 to array.size(fBins) - 1
+                float vv = array.get(fBins, k)
+                if vv > 0
+                    int w = int(flexW * vv / mx)
+                    if w > 0
+                        float y0 = fGrid + k * fStep
+                        int xb = math.max(accBar, bar_index - 300)
+                        array.push(fBox, box.new(xb, y0 + fStep, xb + w, y0, border_width = 0, bgcolor = color.new(cAcc, vv >= mx * 0.98 ? 30 : 72)))
+
+plotshape(sigUp, "Long", shape.triangleup, location.belowbar, cLong, size = size.small)
+plotshape(sigDn, "Short", shape.triangledown, location.abovebar, cShrt, size = size.small)
+
+if sigUp or sigDn
+    label.new(bar_index, sigUp ? low : high, eKind + " " + (sigUp ? "LONG" : "SHORT") + "  " + str.tostring(eScore) + "%\nstop " + str.tostring(eSl, format.mintick) + "   tgt " + str.tostring(eTp, format.mintick), style = sigUp ? label.style_label_up : label.style_label_down, color = color.new(sigUp ? cLong : cShrt, 15), textcolor = #FFFFFF, size = size.small)
+
+var line lSl = na
+var line lTp = na
+if showRisk and not na(eBar) and barstate.islast
+    line.delete(lSl)
+    line.delete(lTp)
+    // Pine caps how far back a bar_index anchor may reach (RE10026), so the
+    // entry bar is clamped into the recent window rather than used raw.
+    int xs = math.max(eBar, bar_index - 300)
+    lSl := line.new(xs, eSl, bar_index + 12, eSl, color = cStop, style = line.style_dashed)
+    lTp := line.new(xs, eTp, bar_index + 12, eTp, color = eLong ? cLong : cShrt, style = line.style_dotted)
+
+// ─────────────────────────────────────── status panel
+var table t = table.new(position.top_left, 2, 7, bgcolor = color.new(#0E1218, 8), frame_color = color.new(#394452, 30), frame_width = 1, border_color = color.new(#394452, 60), border_width = 1)
+
+f_kv(r, k, v, c) =>
+    table.cell(t, 0, r, k, text_size = size.small, text_color = #7C8B9C, text_halign = text.align_left)
+    table.cell(t, 1, r, v, text_size = size.small, text_color = c, text_halign = text.align_left)
+
+if showTbl and barstate.islast
+    f_kv(0, "TraderMachell", status, #E6EDF3)
+    f_kv(1, "PREV  POC/VAH/VAL", (na(pPoc) ? "—" : str.tostring(pPoc, format.mintick)) + "  " + (na(pVah) ? "—" : str.tostring(pVah, format.mintick)) + "  " + (na(pVal) ? "—" : str.tostring(pVal, format.mintick)), cPoc)
+    f_kv(2, "DEV   POC/VAH/VAL", (na(dPoc) ? "—" : str.tostring(dPoc, format.mintick)) + "  " + (na(dVah) ? "—" : str.tostring(dVah, format.mintick)) + "  " + (na(dVal) ? "—" : str.tostring(dVal, format.mintick)), cDev)
+    f_kv(3, "ACCUM / naked POCs", (na(accLvl) ? "—" : str.tostring(accLvl, format.mintick)) + "   n=" + str.tostring(array.size(nakeds)), cAcc)
+    f_kv(4, "ATR proxy / last R", (na(atrV) ? "—" : str.tostring(atrV, format.mintick)) + (na(eSl) or na(ePx) ? "" : "   R=" + str.tostring(math.abs(ePx - eSl), format.mintick)), #7C8B9C)
+    f_kv(5, "Delta source", deltaReal ? "intrabar " + lowTf + " · Level 1" : "range-position proxy · no intrabar", deltaReal ? #26A17B : #E0A33A)
+    f_kv(6, "Last score", eScore == 0 ? "—" : str.tostring(eScore) + "%  (" + eWhy + ")   " + (eKind == "ACCUM" ? "class win-rate 75% n=12" : "class UNGRADED"), #E0A33A)
+
+alertcondition(sigUp, "TraderMachell LONG", "TraderMachell long setup")
+alertcondition(sigDn, "TraderMachell SHORT", "TraderMachell short setup")
