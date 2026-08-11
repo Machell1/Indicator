@@ -139,3 +139,63 @@ one that fires many times a session with a stop that is small by
 construction — not a different exit rule bolted onto this one.
 
 Data: GCQ6 only, one regime, 86 sessions, n=17 and n=12. Small.
+
+---
+
+# Addendum — was the 1-minute calibration earned, or inherited?
+
+The trader asked directly: *"so why did you calibrate it to trade on the
+1M time frame?"* Fair challenge, so it was measured rather than argued.
+
+`harness/dale_tf_test.py` re-bins the same GCQ6 tape to 1/5/15-minute
+bars and re-runs the SAME detection and exit. Everything scale-dependent
+is normalised so the comparison is fair: the ATR proxy is
+`mean(range) * (30/barMin)` so it always spans ~30 minutes; the
+signature search windows and the time stop are expressed in MINUTES and
+converted, so a 5M chart looks over the same wall-clock span as a 1M
+chart rather than 5x longer; the liquidity gate is in 1-minute
+equivalents.
+
+```
+ 1-minute bars  sessions=86  n=17  E[R]=+0.473  tot=+8.0R  win=59%  CI[+0.077,+0.860]
+ 5-minute bars  sessions=86  n=2   E[R]=+0.013  tot=+0.0R  win=50%  CI[-0.959,+0.986]
+15-minute bars  sessions=86  n=0   (signature never completed)
+```
+
+**The 1-minute requirement is earned, and the mechanism is obvious in
+hindsight.** The absorption bar is defined as *high volume, small range*
+(`vol >= 1.3x median` AND `range <= 0.9x median`). That is a contrast
+between two quantities, and bar aggregation destroys it: a 5-minute bar
+containing one absorption minute also contains four other minutes, so its
+range inflates while its volume merely sums. The signature washes out. It
+does not degrade gracefully — it goes 17 -> 2 -> 0.
+
+So there were two independent reasons for 1M, and both hold:
+1. the profile bins the grades were measured on (the `*` convention), and
+2. the entry signature only *exists* at 1-minute resolution.
+
+## What was actually wrong was the DESCRIPTION, not the timeframe
+
+`ONE_MINUTE_ASSESSMENT.md` called 1M "the execution timeframe we tell the
+trader to use" and never stated a holding period. **A 1-minute bar does
+not imply a 1-minute trade**, but "execute on 1M" reads that way, and
+nothing in the docs contradicted it until the scalp backtest put a number
+on the hold: 30-75 minutes, median 43.
+
+That omission is what invited the scalping question. The fix is to state
+both numbers together wherever the timeframe is specified:
+
+> **1-minute chart, 30-75 minute holds, 12-21 point structural stops.**
+> The bar size is what makes the signal visible; it is not the trade
+> duration.
+
+## And it makes the HTF-on-1M gap MORE important, not less
+
+If 1M were merely a convention, the missing HTF composite on 1M would be
+cosmetic — read HTF on 30M and execute wherever. It is not a convention:
+the signature exists nowhere else. The trader is *forced* onto 1M for
+entry, and that is precisely the timeframe where the 3000-bar ceiling
+leaves only 2 of the 5 sessions the composite needs.
+
+`ONE_MINUTE_ASSESSMENT.md` item 1 therefore stands, and its priority is
+if anything understated.
