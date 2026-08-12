@@ -47,11 +47,14 @@ nearATR  = input.float(0.30, "Touch proximity (ATR)", step = 0.05, group = gS)
 iniPct   = input.int(75, "Initiative: |delta| percentile", minval = 50, maxval = 95, group = gS)
 absWin   = input.int(15, "Absorption window (min)", minval = 1, group = gS)
 iniWin   = input.int(5, "Initiative window (min)", minval = 1, group = gS)
-rearmATR = input.float(0.5, "Re-arm distance (ATR)", step = 0.1, group = gS)
+useWin   = input.bool(true, "Fire only 09:00-11:00 NY (graded window)", group = gS)
+useLiq   = input.bool(true, "Prior-session liquidity gate (2000c / 120min)", group = gS)
+firstOnly= input.bool(true, "One stack attempt per session (graded: first touch only)", group = gS)
 minScore = input.int(0, "Only show entries scoring >=", minval = 0, maxval = 100, group = gS)
 
 gT = "④ Trade"
-tpR      = input.float(2.0, "Target (R multiple)", step = 0.25, group = gT)
+gradedTp = input.bool(true, "Graded target: nearest prior POC, front-run 0.15 ATR", group = gT)
+tpR      = input.float(2.0, "Fallback target (R multiple)", step = 0.25, group = gT)
 showRisk = input.bool(true, "Draw stop / target", group = gT)
 
 gV = "⑤ Appearance"
@@ -66,6 +69,11 @@ cStop = input.color(#7A6060, "Stop", group = gV)
 showTbl = input.bool(true, "Status panel", group = gV)
 
 vaPct = vaIn / 100.0
+
+// timeframe scaling (simple ints, needed before the session roll block)
+int tfMin = math.max(1, int(timeframe.in_seconds() / 60))
+int atrN = math.max(30, int(420 / tfMin))
+int sigN = math.max(5, int(120 / tfMin))
 
 // ─────────────────────────────────────── delta (Level 1 is enough)
 lowTf = timeframe.period == "1" ? "1S" : "1"
@@ -134,34 +142,22 @@ f_profile(hs, ls, vs, nrows) =>
             val := gridLo + dn * step
     [poc, vah, val, gridLo, step, bins]
 
-f_mean(a) =>
-    float s = 0.0
-    int n = array.size(a)
-    if n > 0
-        for i = 0 to n - 1
-            s += array.get(a, i)
-    n > 0 ? s / n : na
-
-f_pct(a, p) =>
-    float r = na
-    int n = array.size(a)
-    if n > 4
-        array<float> c = array.copy(a)
-        array.sort(c, order.ascending)
-        r := array.get(c, math.min(n - 1, int(n * p / 100.0)))
-    r
-
 f_bars(mins) =>
     math.max(1, int(mins / math.max(1, timeframe.in_seconds() / 60)))
 
 // ─────────────────────────────────────── session buffers
-newSess = ta.change(time("D")) != 0
+// CME session day rolls at 17:00 New York (the graded engine's
+// sessionKey), NOT the chart's day boundary. The key increments only at
+// the 17:00 NY crossing: at NY midnight dayofyear rises exactly as the
+// +1 evening flag clears, so the key holds.
+int nyMin = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+int sessKey = year(time, "America/New_York") * 400 + dayofyear(time, "America/New_York") + (nyMin >= 1020 ? 1 : 0)
+newSess = ta.change(sessKey) != 0
+bool inNyWindow = nyMin >= 540 and nyMin < 660
 
 var array<float> sH = array.new_float()
 var array<float> sL = array.new_float()
 var array<float> sV = array.new_float()
-var array<float> sR = array.new_float()
-var array<float> sD = array.new_float()
 var array<float> nakeds = array.new_float()
 
 var float pPoc = na
@@ -171,6 +167,8 @@ var float dPoc = na
 var float dVah = na
 var float dVal = na
 var int sCount = 0
+var bool prevLiquid = false
+var array<float> priorPocs = array.new_float()
 
 if newSess and array.size(sL) > 5
     [p1, a1, v1, g1, s1, b1] = f_profile(sH, sL, sV, rows)
@@ -182,18 +180,18 @@ if newSess and array.size(sL) > 5
         pPoc := p1
         pVah := a1
         pVal := v1
+        prevLiquid := array.sum(sV) >= 2000 and array.size(sV) >= int(120 / tfMin)
+        array.push(priorPocs, p1)
+        while array.size(priorPocs) > 10
+            array.shift(priorPocs)
     array.clear(sH)
     array.clear(sL)
     array.clear(sV)
-    array.clear(sR)
-    array.clear(sD)
     sCount := 0
 
 array.push(sH, high)
 array.push(sL, low)
 array.push(sV, volume)
-array.push(sR, high - low)
-array.push(sD, dlt)
 sCount += 1
 
 if showNPOC and array.size(nakeds) > 0
@@ -209,20 +207,16 @@ if showDev and sCount > 30 and bar_index % 10 == 0
     dVah := a2
     dVal := v2
 
-// ─────────────────────────────────────── session statistics
-float atrV = na
-if array.size(sR) > 0
-    atrV := f_mean(sR) * 30.0
-
-float vMed = array.size(sV) > 4 ? array.median(sV) : na
-float rMed = array.size(sR) > 4 ? array.median(sR) : na
-
-var array<float> absD = array.new_float()
-array.clear(absD)
-if array.size(sD) > 0
-    for i = 0 to array.size(sD) - 1
-        array.push(absD, math.abs(array.get(sD, i)))
-float dP = f_pct(absD, iniPct)
+// ─────────────────────────────────────── trailing statistics
+// Graded live-causal calibration: ATR = trailing mean 1-min range x30
+// over ~420 minutes ACROSS sessions; signature/flow stats over a
+// trailing ~120-minute window (whole-session stats are the documented
+// calibration trap -- see the engine's sigStatWindow note).
+float atrV = ta.sma(high - low, atrN) * 30.0 / tfMin
+float vMed = ta.median(volume, sigN)
+float rMed = ta.median(high - low, sigN)
+float dP  = ta.percentile_nearest_rank(math.abs(dlt), sigN, iniPct)
+float d90 = ta.percentile_nearest_rank(math.abs(dlt), sigN, 90)
 
 // ─────────────────────────────────────── rotation → flexible profile
 var float rotHi = na
@@ -277,7 +271,8 @@ if not na(atrV) and atrV > 0 and bar_index > rotBars + 5 and barstate.isconfirme
                     accLvl := fp
                     rotUp := up
                     accBar := bar_index
-                    accStop := up ? fv - 0.60 * atrV : fa + 0.60 * atrV
+                    // graded stop: first LVN bin behind the VA edge
+                    accStop := f_lvnStop(fg, fs, fb, up, atrV, fv, fa)
                     fGrid := fg
                     fStep := fs
                     fBins := fb
@@ -287,8 +282,52 @@ if not na(atrV) and atrV > 0 and bar_index > rotBars + 5 and barstate.isconfirme
             else if not (up or dn)
                 rotS := na
 
+// ─────────────────────────────────────── graded target + LVN stop
+// _target(): nearest prior-session POC beyond entry, front-run 0.15 ATR;
+// 0.8 ATR when none; never closer than half the risk (v5.11 clamp).
+f_target(entry, dirn, atr, rsk) =>
+    float tp = na
+    float best = na
+    if array.size(priorPocs) > 0
+        for i = 0 to array.size(priorPocs) - 1
+            float pp = array.get(priorPocs, i)
+            if (pp - entry) * dirn > 0.05 * atr
+                if na(best) or math.abs(pp - entry) < math.abs(best - entry)
+                    best := pp
+    tp := na(best) ? entry + dirn * 0.8 * atr : best - dirn * 0.15 * atr
+    if rsk > 0 and math.abs(tp - entry) < 0.5 * rsk
+        tp := entry + dirn * rsk
+    tp
+
+// stopBehindLVN(): first bin under 30% of POC volume beyond the VA edge,
+// pad 0.10 ATR; 0.60 ATR beyond the edge when none within 60 rows.
+f_lvnStop(_grid, _step, _bins, _long, _atr, _vaLo, _vaHi) =>
+    float st = _long ? _vaLo - 0.60 * _atr : _vaHi + 0.60 * _atr
+    int nb = array.size(_bins)
+    if nb > 0 and not na(_grid) and not na(_step) and _step > 0
+        float pv = array.max(_bins)
+        if pv > 0
+            if _long
+                int k0 = int((_vaLo - _grid) / _step)
+                bool hit = false
+                for k = math.min(k0 - 1, nb - 1) to math.max(k0 - 60, 0)
+                    if not hit and k >= 0 and array.get(_bins, k) < 0.30 * pv
+                        st := _grid + k * _step - 0.10 * _atr
+                        hit := true
+            else
+                int k0 = int((_vaHi - _grid) / _step)
+                bool hit = false
+                for k = math.max(k0, 0) to math.min(k0 + 60, nb - 1)
+                    if not hit and array.get(_bins, k) < 0.30 * pv
+                        st := _grid + (k + 1) * _step + 0.10 * _atr
+                        hit := true
+    st
+
 // ─────────────────────────────────────── signal state
-var bool armed = true
+var bool armed = false
+var bool wasOut = false
+var float maxd = 0.0
+var bool stackDone = false
 var int tchB = na
 var bool isLong = false
 var bool absOn = false
@@ -307,6 +346,22 @@ var string status = "waiting for a session profile"
 
 bool sigUp = false
 bool sigDn = false
+bool tchEvt = false
+bool absEvt = false
+bool fqEvt = false
+var bool liveSig = false
+var bool liveLong = false
+var float liveEntry = na
+var float liveR = na
+var float liveMaxFav = 0.0
+
+if newSess
+    armed := false
+    wasOut := false
+    maxd := 0.0
+    stackDone := false
+    tchB := na
+    absOn := false
 
 f_score(isAccum, lvl, volX, dX, rPts) =>
     int sc = isAccum ? 30 : 12
@@ -345,40 +400,57 @@ if useAccum and not na(accLvl) and not na(atrV) and barstate.isconfirmed
     if not accArmed and accMaxD >= 1.0 * atrV
         accArmed := true
     bool tch = rotUp ? low <= accLvl : high >= accLvl
-    if accArmed and accWasOut and tch
+    bool winOkA = not useWin or inNyWindow
+    bool nearPrior = not na(pPoc) and math.abs(accLvl - pPoc) < 0.30 * atrV
+    if accArmed and accWasOut and tch and winOkA
+        tchEvt := true
         float volX = na(vMed) ? 1.0 : volume / vMed
         float dX = na(dP) or dP == 0 ? 1.0 : math.abs(dlt) / dP
         float rr = math.abs(close - accStop)
         [sc, why] = f_score(true, accLvl, volX, dX, rr)
-        if sc >= minScore and rr > 0
+        // graded semantics: entry only when the close is still within
+        // 0.30 ATR of the level, and never duplicating the prior POC
+        if sc >= minScore and rr > 0 and math.abs(close - accLvl) <= 0.30 * atrV and not nearPrior
             eLong := rotUp
             ePx := close
             eSl := accStop
-            eTp := rotUp ? close + tpR * rr : close - tpR * rr
+            eTp := gradedTp ? f_target(accLvl, rotUp ? 1 : -1, atrV, rr) : (rotUp ? close + tpR * rr : close - tpR * rr)
             eBar := bar_index
             eScore := sc
             eWhy := why
             eKind := "ACCUM"
             sigUp := rotUp
             sigDn := not rotUp
+            liveSig := true
+            liveLong := rotUp
+            liveEntry := close
+            liveR := rr
+            liveMaxFav := 0.0
             status := "ACCUM retest — " + (rotUp ? "LONG" : "SHORT") + "  score " + str.tostring(sc)
         accArmed := false
         accWasOut := false
         accMaxD := 0.0
 
 // ---- prior-POC stack
-if useStack and not na(pPoc) and not na(atrV) and not na(vMed) and not na(rMed) and not na(dP) and barstate.isconfirmed
-    if not armed and math.abs(close - pPoc) >= rearmATR * atrV
+bool liqOk = not useLiq or prevLiquid
+if useStack and not na(pPoc) and not na(atrV) and not na(vMed) and not na(rMed) and not na(dP) and liqOk and not (firstOnly and stackDone) and barstate.isconfirmed
+    // graded arming: price must have travelled >=1 ATR from the level
+    // (moveAwayATR) and been meaningfully outside it, once per session
+    float dAbs = math.abs(close - pPoc)
+    maxd := math.max(maxd, dAbs)
+    if dAbs > 0.10 * atrV
+        wasOut := true
+    if not armed and maxd >= 1.0 * atrV and wasOut
         armed := true
-        tchB := na
-        absOn := false
-        status := "armed — level vacated, watching for the retest"
-    if armed and low <= pPoc and high >= pPoc and na(tchB)
+        status := "armed — watching for the first retest" + (useWin and not inNyWindow ? " (outside 09:00-11:00 NY)" : "")
+    bool winOk = not useWin or inNyWindow
+    if armed and winOk and low <= pPoc and high >= pPoc and na(tchB)
         tchB := bar_index
         isLong := close[1] > pPoc
         armed := false
         absOn := false
         runX := isLong ? low : high
+        tchEvt := true
         status := (isLong ? "LONG" : "SHORT") + " touch — waiting for absorption"
     if not na(tchB)
         runX := isLong ? math.min(runX, low) : math.max(runX, high)
@@ -387,6 +459,7 @@ if useStack and not na(pPoc) and not na(atrV) and not na(vMed) and not na(rMed) 
             if volume >= absVolX * vMed and (high - low) <= absRngX * rMed and holds
                 absOn := true
                 absB := bar_index
+                absEvt := true
                 status := (isLong ? "LONG" : "SHORT") + " absorption — waiting for initiative"
         if absOn and bar_index - absB <= f_bars(iniWin)
             if math.abs(dlt) >= dP and (isLong ? dlt > 0 : dlt < 0)
@@ -397,23 +470,43 @@ if useStack and not na(pPoc) and not na(atrV) and not na(vMed) and not na(rMed) 
                     eLong := isLong
                     ePx := close
                     eSl := st
-                    eTp := isLong ? close + tpR * rr2 : close - tpR * rr2
+                    eTp := gradedTp ? f_target(pPoc, isLong ? 1 : -1, atrV, rr2) : (isLong ? close + tpR * rr2 : close - tpR * rr2)
                     eBar := bar_index
                     eScore := sc2
                     eWhy := why2
                     eKind := "STACK"
                     sigUp := isLong
                     sigDn := not isLong
+                    liveSig := true
+                    liveLong := isLong
+                    liveEntry := close
+                    liveR := rr2
+                    liveMaxFav := 0.0
                     status := (isLong ? "LONG" : "SHORT") + " ENTRY — score " + str.tostring(sc2)
                 tchB := na
                 absOn := false
+                stackDone := true
         if not na(tchB) and bar_index - tchB > f_bars(absWin) and not absOn
             tchB := na
+            stackDone := true
             status := "stood down — touch had no absorption signature"
         else if absOn and not na(absB) and bar_index - absB > f_bars(iniWin)
             absOn := false
             tchB := na
             status := "stood down — absorption never drew initiative"
+
+// ─────────────────────────────────────── flow-quit (playbook exit)
+if liveSig and not na(liveR) and liveR > 0 and barstate.isconfirmed
+    float fav = (liveLong ? close - liveEntry : liveEntry - close) / liveR
+    liveMaxFav := math.max(liveMaxFav, fav)
+    if fav <= -1 or liveMaxFav >= 3
+        liveSig := false
+    else if liveMaxFav >= 0.3 and not na(d90) and not na(vMed)
+        bool opp = math.abs(dlt) >= d90 and volume >= 2 * vMed and (liveLong ? dlt < 0 : dlt > 0)
+        if opp
+            fqEvt := true
+            liveSig := false
+            status := "FLOW QUIT — opposing flow while in profit (playbook exit)"
 
 // ─────────────────────────────────────── drawing
 plot(showPrev ? pPoc : na, "PREV POC", cPoc, 2, plot.style_linebr)
@@ -486,7 +579,7 @@ if showRisk and not na(eBar) and barstate.islast
     lTp := line.new(xs, eTp, bar_index + 12, eTp, color = eLong ? cLong : cShrt, style = line.style_dotted)
 
 // ─────────────────────────────────────── status panel
-var table t = table.new(position.top_left, 2, 7, bgcolor = color.new(#0E1218, 8), frame_color = color.new(#394452, 30), frame_width = 1, border_color = color.new(#394452, 60), border_width = 1)
+var table t = table.new(position.top_left, 2, 8, bgcolor = color.new(#0E1218, 8), frame_color = color.new(#394452, 30), frame_width = 1, border_color = color.new(#394452, 60), border_width = 1)
 
 f_kv(r, k, v, c) =>
     table.cell(t, 0, r, k, text_size = size.small, text_color = #7C8B9C, text_halign = text.align_left)
@@ -500,6 +593,13 @@ if showTbl and barstate.islast
     f_kv(4, "ATR proxy / last R", (na(atrV) ? "—" : str.tostring(atrV, format.mintick)) + (na(eSl) or na(ePx) ? "" : "   R=" + str.tostring(math.abs(ePx - eSl), format.mintick)), #7C8B9C)
     f_kv(5, "Delta source", deltaReal ? "intrabar " + lowTf + " · Level 1" : "range-position proxy · no intrabar", deltaReal ? #26A17B : #E0A33A)
     f_kv(6, "Last score", eScore == 0 ? "—" : str.tostring(eScore) + "%  (" + eWhy + ")   " + (eKind == "ACCUM" ? "class win-rate 75% n=12" : "class UNGRADED"), #E0A33A)
+    f_kv(7, "Gates", (useWin ? (inNyWindow ? "NY window OPEN" : "outside 09:00-11:00 NY") : "window off") + "  ·  " + (useLiq ? (prevLiquid ? "prior liquid" : "prior THIN — stand down") : "liq gate off"), prevLiquid or not useLiq ? #7C8B9C : #E0A33A)
 
-alertcondition(sigUp, "TraderMachell LONG", "TraderMachell long setup")
-alertcondition(sigDn, "TraderMachell SHORT", "TraderMachell short setup")
+// The playbook's alert-driven routine (docs/PLAYBOOK.md): (1) touch ->
+// do nothing yet; (2) absorption; (3) entry on initiative; (4) FLOW QUIT
+// while in profit. Class grades in the text, never more than measured.
+alertcondition(tchEvt, "TraderMachell TOUCH", "Level touched — do nothing yet, wait for absorption")
+alertcondition(absEvt, "TraderMachell ABSORPTION", "Absorption at the level — waiting for initiative")
+alertcondition(sigUp, "TraderMachell LONG", "TraderMachell LONG entry (ACCUM graded +0.28R/75% n12; STACK ungraded on this delta)")
+alertcondition(sigDn, "TraderMachell SHORT", "TraderMachell SHORT entry (ACCUM graded +0.28R/75% n12; STACK ungraded on this delta)")
+alertcondition(fqEvt, "TraderMachell FLOW QUIT", "Opposing flow while in profit — playbook exit")
