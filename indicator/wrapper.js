@@ -533,6 +533,7 @@ class traderMachell {
       dev: pBool(p.devProfile, true),        // developing session profile (SVP)
       rowsPlot: pBool(p.rowsPlot, true),     // translucent plotter rows (v10)
       edge: pBool(p.edgeProfile, true),      // right-edge pinned live profile (v12)
+      fibs: pBool(p.fibs, true),             // fib retracements of the session leg (UNTESTED aid)
       edgeW: pNum(p.edgeWidth, 140),         // edge profile max row width, px
       edgeOff: Number.isFinite(Number(p.edgeOffset)) ? Number(p.edgeOffset) : 170,
       nodes: pBool(p.nodes, true),           // HVN/LVN ticks on the prior profile
@@ -678,6 +679,21 @@ class traderMachell {
     if (this._mp.size > 12)
       this._mp.delete(this._mp.keys().next().value);
     return res;
+  }
+
+  // ---- session extremes for the fib layer (display-only, cached) ----
+  _fibx(out) {
+    const bars = this.core.dayBars;
+    if (!bars || bars.length < 5) return null;
+    const F = this._fx;
+    if (F && F.day === out.day && F.n === bars.length) return F;
+    let hi = -Infinity, lo = Infinity, hiT = 0, loT = 0;
+    for (const b of bars) {
+      if (b.h > hi) { hi = b.h; hiT = b.tMs; }
+      if (b.l < lo) { lo = b.l; loT = b.tMs; }
+    }
+    this._fx = { day: out.day, n: bars.length, hi, lo, hiT, loT };
+    return this._fx;
   }
 
   // ---- developing session profile (SVP layer, display-only) ----
@@ -1397,6 +1413,32 @@ class traderMachell {
       lab("slT", ev.sl, "SL " + fmtL(ev.sl), COLORS.sl);
     }
 
+    // ---- fib retracements of the CURRENT session leg (UNTESTED aid) ----
+    // Assists entries as CONFLUENCE only -- like HTF alignment, it never
+    // gates a graded machine. Leg direction follows which extreme is more
+    // recent (low before high = up-leg, retrace measured down from the
+    // high). Anchor-free level lines (v11 form); labels unstarred because
+    // session extremes are exact at every timeframe (only profile-binned
+    // levels earn the coarse-bin star).
+    if (O.fibs) {
+      const fx = this._fibx(out);
+      if (fx && fx.hi > fx.lo) {
+        const span = fx.hi - fx.lo;
+        const upLeg = fx.hiT >= fx.loT;
+        const ratios = [0.382, 0.5, 0.618, 0.786];
+        for (let fi = 0; fi < ratios.length; fi++) {
+          const r = ratios[fi];
+          const pF = upLeg ? fx.hi - r * span : fx.lo + r * span;
+          const near = out.prev && out.atr > 0 &&
+            Math.abs(pF - out.prev.poc) < 0.15 * out.atr;
+          lvl("fibL" + fi, pF, "#8A93A3", 1, 3);
+          lab("fibT" + fi, pF,
+            "FIB " + (r * 100).toFixed(1) + " " + fmt(pF) +
+            (near ? "  ≈POC" : ""), "#8A93A3", FONT_XS);
+        }
+      }
+    }
+
     // ---- v12: right-edge pinned LIVE-SESSION profile (HANDOFF_v12,
     // trader-approved, ADDITIVE) ----
     // Pinned to the pane's right edge via a grid-right container: the
@@ -1810,6 +1852,7 @@ module.exports = {
     vaFillOpacity: predef.paramSpecs.number(14, 1, 0),// band opacity 0..100 (14 = trader-calibrated live; 80 = "is it drawing at all?" probe)
     rowsPlot: predef.paramSpecs.number(1, 1, 0),      // 1 = developing rows translucent via plotter, day-wide (v10); 0 = v9.3 opaque 150-bar rows
     edgeProfile: predef.paramSpecs.number(1, 1, 0),   // 1 = right-edge pinned live-session profile (v12, time-axis-free)
+    fibs: predef.paramSpecs.number(1, 1, 0),          // 1 = session-leg fib retracements (UNTESTED aid, info only)
     edgeWidth: predef.paramSpecs.number(140, 10, 20), // edge profile max row width, px
     edgeOffset: predef.paramSpecs.number(170, 10, 0), // px inboard from the pane edge (sits left of the community VZO at 150)
     rowOpacity: predef.paramSpecs.number(20, 1, 0),   // row opacity 0..100 (first guess -- calibrate live like the band)
