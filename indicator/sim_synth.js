@@ -1823,6 +1823,55 @@ if (aln.length) {
   console.log('part22 edge profile:        px-only X, pinned, session-keyed, duTime-immune, additive OK');
 }
 
+// -- part 23: footprint absorption visual layer. Price-level candidates
+// publish translucent plotter strips, directional labels with amounts, and
+// obey an independent bounded budget. --------------------------------------
+{
+  const R23 = runModel('A', 300, {
+    htfSessions: 20, rowsPlot: '0', orderFlow: '1',
+    absOpacity: '31', absMaxLabels: '8',
+  });
+  const inst23 = R23.inst;
+  const iLast = n - 1;
+  const t23 = inst23.tmsList[inst23.tmsList.length - 20];
+  const p23 = inst23.lastOut.prev.poc;
+  inst23.flowProfileSeen = true;
+  inst23.flowAbsorptions = [{
+    tMs: t23, day: inst23.lastOut.day, price: p23, long: true,
+    aggressor: 'BID', amount: 84, totalVolume: 100, ratio: 4.2,
+    strength: 0.8, source: 'price-level executed bid/ask',
+  }];
+  const it23 = inst23.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  const lab23 = it23.find(x => x.key && x.key.startsWith('faT'));
+  check(!!lab23 && lab23.text.indexOf('BID ABS ~84  4.2x') >= 0,
+    'part23: amount/ratio label missing');
+  check(!!lab23 && lab23.style.fill === '#00C853',
+    'part23: bullish footprint not green');
+  check(inst23._plotAbsorbs && inst23._plotAbsorbs.length === 1,
+    'part23: plotter payload missing');
+  const P23 = inst23._plotAbsorbs && inst23._plotAbsorbs[0];
+  if (P23) {
+    check(P23.opacity === 0.31 && P23.w >= 2 && P23.h > 0,
+      'part23: opacity/size payload malformed');
+    const draws23 = [];
+    const custom23 = (mod.plotter || []).find(pl => pl && pl.type === 'custom').fn;
+    const hist23 = { data: { length: iLast + 1 }, get: j => ({ __x: j }) };
+    custom23({ drawLine: (a, b, s) => draws23.push({ a, b, s }) },
+      { props: { rowsPlot: '0', orderFlow: '1' }, _plotProfiles: null,
+        _plotAbsorbs: [P23] }, hist23);
+    check(draws23.length === P23.w && draws23.length <= 400,
+      'part23: footprint stroke count/budget wrong');
+    check(draws23.every(x => x.s.color === '#00C853' && x.s.opacity === 0.31),
+      'part23: plotter color/opacity wrong');
+    const off23 = [];
+    custom23({ drawLine: () => off23.push(1) },
+      { props: { rowsPlot: '0', orderFlow: '0' }, _plotProfiles: null,
+        _plotAbsorbs: [P23] }, hist23);
+    check(off23.length === 0, 'part23: orderFlow toggle failed');
+  }
+  console.log('part23 footprint absorption: translucent sizing, amount labels, budget OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;
