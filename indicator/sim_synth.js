@@ -1823,6 +1823,95 @@ if (aln.length) {
   console.log('part22 edge profile:        px-only X, pinned, session-keyed, duTime-immune, additive OK');
 }
 
+// -- part 23: v13 level-absorption overlay + Rapid Daily / Asian window --
+{
+  const { inNyWindow } = require('./dale_core.js');
+  const asian = { windows: [{ start: 18, end: 3 }], nyStartHour: 18, nyEndHour: 3 };
+  const ny = { nyStartHour: 9, nyEndHour: 11 };
+  // August 2026 is EDT (UTC-4)
+  check(inNyWindow(Date.parse('2026-08-11T02:00:00Z'), asian),
+    'part23: 22:00 NY not in Asian window');
+  check(inNyWindow(Date.parse('2026-08-11T05:00:00Z'), asian),
+    'part23: 01:00 NY not in Asian window');
+  check(!inNyWindow(Date.parse('2026-08-11T14:00:00Z'), asian),
+    'part23: 10:00 NY wrongly in Asian window');
+  check(inNyWindow(Date.parse('2026-08-11T14:00:00Z'), ny),
+    'part23: 10:00 NY not in graded window');
+  check(!inNyWindow(Date.parse('2026-08-11T02:00:00Z'), ny),
+    'part23: 22:00 NY wrongly in graded window');
+
+  const inst = A.inst;
+  const out = inst.lastOut;
+  const poc = out.prev.poc;
+  const t0 = inst.tmsList[inst.tmsList.length - 40];
+  const t1 = inst.tmsList[inst.tmsList.length - 5];
+  inst.levelFlow = {
+    poc: { key: 'poc', name: 'POC', price: poc, day: out.day,
+      bid: 1240, ask: 180, vol: 1420, firstTms: t0, lastTms: t1,
+      hits: 12, closed: false },
+    vah: { key: 'vah', name: 'VAH', price: out.prev.vah, day: out.day,
+      bid: 90, ask: 980, vol: 1070, firstTms: t0, lastTms: t1,
+      hits: 8, closed: false },
+  };
+  inst._volTrail = [80, 90, 100, 110, 95];
+  inst.props = Object.assign({}, inst.props, { absorbViz: '1', sessionMode: '1',
+    acctSize: '50' });
+  const lastEnt = entity(bars[n - 1], true, true);
+  const items23 = inst.buildItems(lastEnt, n - 1, null);
+  const bidLab = items23.find(x => x.key === 'abCpoc');
+  const askLab = items23.find(x => x.key === 'abCvah');
+  check(!!bidLab && /BID ABS/.test(bidLab.text) && /1\.2k/.test(bidLab.text),
+    'part23: bid absorption label missing: ' + (bidLab && bidLab.text));
+  check(bidLab && bidLab.style.fill === '#00C853', 'part23: bid cloud not green');
+  check(!!askLab && /ASK ABS/.test(askLab.text),
+    'part23: ask absorption label missing: ' + (askLab && askLab.text));
+  check(askLab && askLab.style.fill === '#FF5252', 'part23: ask cloud not red');
+  check(inst._plotAbsorb && inst._plotAbsorb.length >= 2,
+    'part23: plotter absorb payload missing');
+  const green = inst._plotAbsorb.find(B => B.bidDom);
+  const red = inst._plotAbsorb.find(B => !B.bidDom);
+  check(green && green.opac > 0 && green.opac < 1 && green.h > 0,
+    'part23: green blob size/opacity');
+  check(red && red.color === '#FF5252', 'part23: red blob color');
+
+  const custom23 = (mod.plotter || []).find(pl => pl && pl.type === 'custom').fn;
+  const hist23 = { data: { length: n }, get: j => ({ __x: j }) };
+  const draws23 = [];
+  custom23({ drawLine: (a, b, s) => draws23.push({ a, b, s }) }, inst, hist23);
+  const absDraws = draws23.filter(d => d.s &&
+    (d.s.color === '#00C853' || d.s.color === '#FF5252'));
+  check(absDraws.length > 0, 'part23: plotter drew no absorption strips');
+  check(absDraws.every(d => d.s.opacity > 0 && d.s.opacity < 1),
+    'part23: absorption strips not translucent');
+  check(absDraws.every(d => d.s.relativeWidth === 1),
+    'part23: absorption strips not bar-wide');
+
+  const banner = items23.find(x => x.key === 'statR');
+  check(!!banner && /Rapid Daily 50K/.test(banner.text) && /DLL \$1000/.test(banner.text) &&
+    /Asian 18:00-03:00 NY/.test(banner.text) && /FLAT 15:10 CT/.test(banner.text),
+    'part23: Rapid Daily banner missing: ' + (banner && banner.text));
+
+  inst.props = Object.assign({}, inst.props, { sessionMode: '0', acctSize: '25' });
+  inst._applySessionCfg();
+  const itemsNy = inst.buildItems(lastEnt, n - 1, null);
+  const bNy = itemsNy.find(x => x.key === 'statR');
+  check(!!bNy && /Rapid Daily 25K/.test(bNy.text) && /DLL \$500/.test(bNy.text) &&
+    /09:00-11:00 NY/.test(bNy.text),
+    'part23: NY/25K banner: ' + (bNy && bNy.text));
+  check(inst.core.cfg.nyStartHour === 9 && inst.core.cfg.nyEndHour === 11,
+    'part23: sessionMode=0 did not restore NY hours');
+
+  for (const it of items23) {
+    const cols = [];
+    if (it.fillStyle && it.fillStyle.color) cols.push(it.fillStyle.color);
+    if (it.lineStyle && it.lineStyle.color) cols.push(it.lineStyle.color);
+    if (it.style && it.style.fill) cols.push(it.style.fill);
+    for (const c of cols)
+      check(/^#[0-9A-Fa-f]{6}$/.test(c), 'part23: non-hex color on items: ' + c);
+  }
+  console.log('part23 absorption overlay:  wrap window, green/red amounts, plotter alpha, Rapid Daily card OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;

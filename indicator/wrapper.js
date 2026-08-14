@@ -100,6 +100,31 @@
  *  - SESSION START marker line; STATUS BANNER top-left with fixed slots;
  *    alignTest=1 self-test row (RECT_Y_ANCHOR flip protocol below).
  *
+ * VISUAL v13 -- LEVEL ABSORPTION overlay + Rapid Daily / Asian session
+ * (docs/VISUAL_V13_ABSORPTION.md). Replaces the poor orange-diamond +
+ * "ABSORPTION" stamp as the primary read of order flow at levels:
+ *  - Source: Tradovate `d.profile()` {price, vol, bidVol, askVol} per bar
+ *    (executed aggressor volume at price -- the order-flow data the
+ *    custom-indicator sandbox actually exposes). SuperDOM / resting
+ *    book is NOT available to chart indicators (platform fact); the
+ *    banner discloses this. Bar bidVolume/offerVolume is the fallback
+ *    when profile() is missing (Node sims, older builds).
+ *  - At each structural level (prev POC/VAH/VAL, ACCUM, naked POCs,
+ *    developing POC/VAH/VAL) we accumulate bid vs ask while price holds.
+ *    GREEN = bids absorbing sells (support). RED = offers absorbing
+ *    buys (resistance). Cloud SIZE (width in bars, height in ticks,
+ *    plotter opacity) scales with contracts absorbed; the amount is
+ *    labeled on the cloud.
+ *  - Translucency rides the proven custom-plotter path (Bug A: graphics
+ *    fill alpha is broken). Labels stay on the items path (plotter has
+ *    no text).
+ *  - Default signal window is ASIAN 18:00-03:00 NY (sessionMode=1),
+ *    wrapping midnight. sessionMode=0 restores the graded 09:00-11:00
+ *    NY window; =2 ORs both. Asian signals are UNGRADED -- the +0.40R
+ *    / +0.28R tags were measured on the NY / no-TOD harness.
+ *  - Rapid Daily account card (acctSize 25/50/100) is display-only:
+ *    DLL / MLL / contract cap / 15:10 CT flatten. No auto-flatten.
+ *
  * Other platform facts respected (TraderMachell_Review_v2.md section 4):
  * graphics only on d.isLast(), global:true + stable keys, Text needs
  * fontSize+fill, no mixed-unit op() on X, no lineStyle.opacity, tmsList
@@ -159,6 +184,8 @@ const COLORS = {
   naked: "#E53935", nakedTxt: "#EF9A9A",
   buy: "#00C853", sell: "#FF5252", tp: "#00C853", sl: "#FF5252",
   absorb: "#FFA500", conflu: "#FF8C00", warn: "#FFA500",
+  absorbBid: "#00C853",   // bids absorbing sells (support) -- plotter green
+  absorbAsk: "#FF5252",   // offers absorbing buys (resistance) -- plotter red
   status: "#E0E0E0", dim: "#9E9E9E",
   dayLine: "#565B66",
   test: "#FF00FF",
@@ -214,6 +241,48 @@ function pBool(v, dflt) {
 function pNum(v, dflt) {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+// pNum rejects 0 (used as "positive widths / counts"). sessionMode=0 is
+// the graded NY window and MUST round-trip; never run it through pNum.
+function pInt(v, dflt) {
+  if (v === undefined || v === null || v === "") return dflt;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : dflt;
+}
+
+// FundedNext Futures Rapid Daily (display-only account card).
+// DLL is a soft breach (pauses the day). MLL is end-of-day trailing and
+// closes the account. Flatten is 15:10 CT -- Asian traders are done
+// hours earlier; the banner still names the hard platform cutoff.
+const RAPID = {
+  25: { size: 25, dll: 500, mll: 1000, mini: 2, micro: 20 },
+  50: { size: 50, dll: 1000, mll: 2000, mini: 4, micro: 40 },
+  100: { size: 100, dll: 1250, mll: 2500, mini: 6, micro: 60 },
+};
+function rapidCard(size) {
+  const n = pInt(size, 50);
+  return n >= 100 ? RAPID[100] : (n >= 50 ? RAPID[50] : RAPID[25]);
+}
+function sessionSpec(mode) {
+  const m = pInt(mode, 1);
+  if (m === 0) return {
+    windows: [{ start: 9, end: 11 }],
+    label: "09:00-11:00 NY", tag: "NY",
+  };
+  if (m === 2) return {
+    windows: [{ start: 18, end: 3 }, { start: 9, end: 11 }],
+    label: "Asian 18:00-03:00 NY + 09:00-11:00 NY", tag: "ASIAN+NY",
+  };
+  return {
+    windows: [{ start: 18, end: 3 }],
+    label: "Asian 18:00-03:00 NY", tag: "ASIAN",
+  };
+}
+function fmtAbs(n) {
+  const v = Math.round(Math.abs(n) || 0);
+  if (v >= 10000) return (v / 1000).toFixed(1) + "k";
+  if (v >= 1000) return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + "k";
+  return String(v);
 }
 
 // ---- du emission transform (field report section 10) ---------------------
@@ -404,6 +473,9 @@ class traderMachell {
       // gate) -- clamp so a dialog value of 1-4 can't silently starve it
       htfSessions: Math.max(5, Math.round(pNum(this.props && this.props.htfSessions, 20))),
     });
+    this._applySessionCfg();
+    this.levelFlow = {};          // structural-level bid/ask accumulation
+    this._volTrail = [];          // trailing bar volume for absorb sizing
     // du-mode row caps, rescaled so a row's bar-width tracks real time when
     // the zoom buttons switch aggregation (Q1 resets the indicator anyway)
     const cap = (b) => Math.max(20, Math.round(b / barMin));
@@ -545,7 +617,136 @@ class traderMachell {
       // (minute-slots only while the chart is live: last pushed bar fresh)
       duTime: [0, 1, 2].indexOf(Number(p.duTime)) >= 0 ? Number(p.duTime) : 2,
       originShift: Number.isFinite(Number(p.originShift)) ? Number(p.originShift) : 0,
+      absorbViz: pBool(p.absorbViz, true),   // translucent level-absorption clouds
+      sessionMode: pInt(p.sessionMode, 1),   // 0=NY 9-11, 1=Asian 18-03 (default), 2=both
+      acctSize: pInt(p.acctSize, 50),        // Rapid Daily 25/50/100
     };
+  }
+
+  // Re-apply signal-window hours from props. init() runs once; a dialog
+  // change of sessionMode must take effect on the next draw without an F5.
+  _applySessionCfg() {
+    if (!this.core || !this.core.cfg) return;
+    const spec = sessionSpec(this.props && this.props.sessionMode);
+    this.core.cfg.windows = spec.windows;
+    this.core.cfg.nyStartHour = spec.windows[0].start;
+    this.core.cfg.nyEndHour = spec.windows[0].end;
+    this.core.cfg.windowLabel = spec.label;
+    this._sessionTag = spec.tag;
+  }
+
+  _tickSize() {
+    const t = this.contractInfo && this.contractInfo.tickSize;
+    return (t > 0) ? t : 0.1;
+  }
+
+  _readProfile(e) {
+    let p = null;
+    try {
+      if (e && typeof e.profile === "function") p = e.profile();
+    } catch (err) { p = null; }
+    return (p && p.length) ? p : null;
+  }
+
+  // Executed order flow at a price: profile() bidVol/askVol within 1 tick
+  // of the level (the sandbox's order-book-at-price). Falls back to the
+  // bar's bidVolume/offerVolume when the bar traded the level and no
+  // per-price profile is available.
+  _flowNear(e, price, tick) {
+    const prof = this._readProfile(e);
+    let bid = 0, ask = 0, vol = 0, rows = 0;
+    if (prof) {
+      const band = tick * 1.01;
+      for (let i = 0; i < prof.length; i++) {
+        const row = prof[i];
+        if (!row || Math.abs(row.price - price) > band) continue;
+        const b = Number(row.bidVol) || 0;
+        const a = Number(row.askVol) || 0;
+        bid += b; ask += a;
+        vol += (Number(row.vol) > 0) ? Number(row.vol) : (b + a);
+        rows++;
+      }
+    }
+    if (rows === 0) {
+      if (!e || typeof e.low !== "function") return null;
+      if (e.low() > price + tick || e.high() < price - tick) return null;
+      bid = typeof e.bidVolume === "function" ? (e.bidVolume() || 0) : 0;
+      ask = typeof e.offerVolume === "function" ? (e.offerVolume() || 0) : 0;
+      vol = bid + ask;
+      if (!(vol > 0) && typeof e.volume === "function") vol = e.volume() || 0;
+    }
+    if (!(vol > 0) && !(bid > 0) && !(ask > 0)) return null;
+    return { bid, ask, vol };
+  }
+
+  _trackedLevels(out) {
+    const lv = [];
+    if (!out) return lv;
+    if (out.prev) {
+      lv.push({ key: "poc", price: out.prev.poc, name: "POC" });
+      lv.push({ key: "vah", price: out.prev.vah, name: "VAH" });
+      lv.push({ key: "val", price: out.prev.val, name: "VAL" });
+    }
+    if (out.accum) lv.push({ key: "acc", price: out.accum.level, name: "ACCUM" });
+    if (out.nakedPocs) {
+      for (let i = 0; i < out.nakedPocs.length && i < 4; i++)
+        lv.push({ key: "nk" + out.nakedPocs[i].endTms,
+          price: out.nakedPocs[i].poc, name: "NPOC" });
+    }
+    const dev = this._dev && this._dev.ok ? this._dev : null;
+    if (dev) {
+      lv.push({ key: "dpoc", price: dev.poc, name: "dPOC" });
+      lv.push({ key: "dvah", price: dev.vah, name: "dVAH" });
+      lv.push({ key: "dval", price: dev.val, name: "dVAL" });
+    }
+    return lv;
+  }
+
+  _vmed() {
+    const a = this._volTrail || [];
+    if (!a.length) return 50;
+    const s = a.slice().sort((x, y) => x - y);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  _accumLevelFlow(e, bar, out) {
+    if (!this.levelFlow) this.levelFlow = {};
+    if (!this._volTrail) this._volTrail = [];
+    this._volTrail.push(bar.vol);
+    if (this._volTrail.length > 120) this._volTrail.shift();
+    const tick = this._tickSize();
+    const atr = (out && out.atr) || (tick * 20);
+    const hold = Math.max(tick * 2, 0.30 * atr);
+    const day = out && out.day;
+    const staleMs = 30 * this.barMin * 60e3;
+    for (const k of Object.keys(this.levelFlow)) {
+      const st = this.levelFlow[k];
+      if (st.day !== day) delete this.levelFlow[k];
+      else if (!st.closed && (bar.tMs - st.lastTms) > staleMs) st.closed = true;
+    }
+    const levels = this._trackedLevels(out);
+    for (let i = 0; i < levels.length; i++) {
+      const L = levels[i];
+      const near = bar.l <= L.price + hold && bar.h >= L.price - hold;
+      if (!near) continue;
+      const fl = this._flowNear(e, L.price, tick);
+      if (!fl) continue;
+      let st = this.levelFlow[L.key];
+      if (!st || st.closed || st.day !== day) {
+        st = { key: L.key, name: L.name, price: L.price, day,
+          bid: 0, ask: 0, vol: 0, firstTms: bar.tMs, lastTms: bar.tMs,
+          hits: 0, closed: false };
+        this.levelFlow[L.key] = st;
+      }
+      st.bid += fl.bid;
+      st.ask += fl.ask;
+      st.vol += fl.vol;
+      st.lastTms = bar.tMs;
+      st.price = L.price;
+      st.name = L.name;
+      st.hits++;
+    }
   }
 
   // ---- HVN / LVN nodes on the PRIOR-session profile (display-only) ----
@@ -729,6 +930,7 @@ class traderMachell {
     }
     const out = this.core.push(bar);
     this.lastOut = out;
+    this._accumLevelFlow(e, bar, out);
     if (out.absorb)
       this.marks.push({ tMs, price: bar.c, day: out.day,
         ev: { kind: "absorb", long: this.core.poc.side } });
@@ -741,6 +943,7 @@ class traderMachell {
 
   map(d, i, history) {
     this._checkTimeframe(d);
+    this._applySessionCfg();
     // prepend rebase (Q2): a bar we have ALREADY pushed reveals its
     // current chart index; any shift versus what we stored means history
     // back-loading moved every index -- re-measure the frame offset so
@@ -944,6 +1147,7 @@ class traderMachell {
     // 3=HTF mirror); the list is priority-sorted before the frame ends so
     // the plotter's shared stroke budget degrades least-important last.
     this._plotProfiles = [];
+    this._plotAbsorb = [];
     const rowsToPlotter = O.rowsPlot && duMode;
     const futureKeys = new Set();   // filled by guards below + the final scan
     const idx = (t, layer) => {
@@ -1347,6 +1551,9 @@ class traderMachell {
     // Current session: full detail. Prior sessions: signals shrink to bare
     // arrows (showHistory=1 restores short labels); absorption and
     // flow-quit stamps are current-session only.
+    // v13: the orange "ABSORPTION" word-stamp is replaced by the
+    // translucent level-absorption clouds below. Signature diamonds stay
+    // so the graded absorb→initiative event remains pinpointed.
     let lastSig = null, lastSigIdx, lastAbsorb = null, lastAbsorbIdx;
     for (let m = 0; m < this.marks.length; m++) {
       const mk = this.marks[m];
@@ -1382,19 +1589,71 @@ class traderMachell {
           ev.long ? -24 : 24, FONT_SM, "centerMiddle"));
       if (today) { lastSig = mk; lastSigIdx = mi; }
     }
-    // label the most recent absorption of the session (the diamonds carry
-    // the rest without stamping text over every churn bar)
-    if (lastAbsorb && lastAbsorbIdx !== undefined) {
-      items.push(txt("abT", lastAbsorbIdx, lastAbsorb.price,
-        "ABSORPTION", COLORS.absorb, lastAbsorb.ev.long ? 26 : -26,
-        FONT_SM, "centerMiddle"));
-    }
     if (lastSig && lastSigIdx !== undefined) {
       const ev = lastSig.ev;
       items.push(ray("tpL", lastSigIdx, ev.tp, COLORS.tp, 2, 3));
       lab("tpT", ev.tp, "TP " + fmtL(ev.tp), COLORS.tp);
       items.push(ray("slL", lastSigIdx, ev.sl, COLORS.sl, 2, 2));
       lab("slT", ev.sl, "SL " + fmtL(ev.sl), COLORS.sl);
+    }
+
+    // ---- v13: translucent absorption clouds at structural levels ----
+    // Plotter strips (real opacity) + amount labels (items path; canvas
+    // has no text). Size scales with contracts absorbed; green = bids
+    // eating sells, red = offers eating buys. Current session only.
+    if (O.absorbViz && this.levelFlow) {
+      const vmed = this._vmed();
+      const tick = this._tickSize();
+      const minVol = Math.max(20, 0.6 * vmed);
+      const blobs = [];
+      for (const k of Object.keys(this.levelFlow)) {
+        const st = this.levelFlow[k];
+        if (!st || st.day !== out.day) continue;
+        if (st.hits < 2 && st.vol < 2 * vmed) continue;
+        if (st.vol < minVol) continue;
+        const bidDom = st.bid > st.ask * 1.15;
+        const askDom = st.ask > st.bid * 1.15;
+        if (!bidDom && !askDom) continue;   // balanced = not absorption
+        const i0 = idx(st.firstTms, "abs");
+        const i1raw = idx(st.lastTms, "abs");
+        if (i0 === undefined && i1raw === undefined) continue;
+        let a = (i0 === undefined) ? i1raw : i0;
+        let b = (i1raw === undefined) ? i0 : i1raw;
+        if (b < a) { const t = a; a = b; b = t; }
+        if (b - a < 2) { a = Math.max(0, a - 1); b = b + 1; }
+        const amt = bidDom ? st.bid : st.ask;
+        const scale = Math.min(1, Math.log10(1 + st.vol / Math.max(1, vmed)) / 2);
+        blobs.push({
+          key: st.key, name: st.name, price: st.price,
+          i0: a, i1: b, bid: st.bid, ask: st.ask, vol: st.vol, amt,
+          bidDom, color: bidDom ? COLORS.absorbBid : COLORS.absorbAsk,
+          h: tick * (2 + 10 * Math.min(1, st.vol / (10 * Math.max(1, vmed)))),
+          opac: 0.18 + 0.30 * scale,
+        });
+      }
+      blobs.sort((x, y) => y.vol - x.vol);
+      const shown = blobs.slice(0, 8);
+      for (const B of shown) {
+        this._plotAbsorb.push(B);
+        const side = B.bidDom ? "BID" : "ASK";
+        items.push(txt("abC" + B.key, B.i1, B.price,
+          B.name + " " + side + " ABS " + fmtAbs(B.amt),
+          B.color, B.bidDom ? 18 : -18, FONT_SM, "centerMiddle"));
+      }
+    }
+    // word-stamp: keep when the cloud layer is off, OR when a graded
+    // signature fired and no cloud landed on that price (fabricated-mark
+    // tests, thin profile). Live, the amount-labeled green/red cloud IS
+    // the absorption read and this stamp stays off.
+    if (lastAbsorb && lastAbsorbIdx !== undefined) {
+      const hasCloud = O.absorbViz && this._plotAbsorb &&
+        this._plotAbsorb.some(B => Math.abs(B.price - lastAbsorb.price) <
+          Math.max(0.15 * (out.atr || 1), this._tickSize() * 2));
+      if (!O.absorbViz || !hasCloud) {
+        items.push(txt("abT", lastAbsorbIdx, lastAbsorb.price,
+          "ABSORPTION", COLORS.absorb, lastAbsorb.ev.long ? 26 : -26,
+          FONT_SM, "centerMiddle"));
+      }
     }
 
     // ---- v12: right-edge pinned LIVE-SESSION profile (HANDOFF_v12,
@@ -1471,7 +1730,7 @@ class traderMachell {
           ? slotRect(DU_T(x0), Math.max(10, Math.round((i - x0) / 3)), pLo, pHi)
           : pxrect(x0, 80, pLo, pHi)],
         fillStyle: { color: COLORS.test } });
-      items.push(frameTxt("alnT", 70, O.diag ? 90 : 72,
+      items.push(frameTxt("alnT", 70, O.diag ? 108 : 90,
         "ALIGN TEST: white POC ray must bisect the magenta row. Row ABOVE ray => set RECT_Y_ANCHOR='top'",
         COLORS.test, FONT_SM));
     }
@@ -1632,18 +1891,29 @@ class traderMachell {
     // up/down 1-min volume; live delta is the platform's bid/ask split,
     // corr 0.87 -- this caveat must stay on the banner)
     ctx.push("delta=bid/ask proxy (graded on up/down)");
+    ctx.push("ABS = executed bid/ask at price (not resting DOM)");
+    if (O.sessionMode !== 0)
+      ctx.push((this._sessionTag || "ASIAN") + " window ungraded (grades = 09:00-11:00 NY)");
     // effective modes, always visible: [t-du] = minute-slot emission
     // active (live axis), [du] = bar-index emission, [px] = px widths
     ctx.push(duMode ? (tMode ? "[t-du]" : "[du]") : "[px]");
     items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
       out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
       FONT_SM));
+    const acct = rapidCard(O.acctSize);
+    const spec = sessionSpec(O.sessionMode);
+    items.push(frameTxt("statR", 70, 72,
+      "Rapid Daily " + acct.size + "K  DLL $" + acct.dll +
+      "  MLL $" + acct.mll +
+      "  max " + acct.mini + " mini / " + acct.micro + " micro  " +
+      spec.label + "  FLAT 15:10 CT",
+      COLORS.dim, FONT_SM));
     // prop-delivery diagnostics (field report: instrument, don't assume)
     if (O.diag) {
       const p = this.props || {};
       const dump = ["htfSessions", "scaledWidths", "devProfile", "nodes",
         "vaFill", "vaFillColor", "vaFillOpacity", "showHistory", "alignTest",
-        "diag", "calib"]
+        "diag", "calib", "sessionMode", "acctSize", "absorbViz"]
         .map(k => k + "=" + (typeof p[k]) + ":" + String(p[k])).join("  ");
       // anchor state FIRST: it is the load-bearing diagnostic and the props
       // dump is long enough to clip off the right edge of the viewport
@@ -1667,7 +1937,7 @@ class traderMachell {
       // tf= settles elementSize semantics per timeframe in one screenshot
       // (TIMEFRAME_ANCHORING_SPEC.md section 1.2)
       const cd4 = this.chartDescription;
-      items.push(frameTxt("stat4", 70, 72,
+      items.push(frameTxt("stat4", 70, 90,
         "tf=" + (cd4 ? cd4.underlyingType + "/" + cd4.elementSize : "none") +
         " barMin=" + this.barMin +
         " bidx=" + (typeof d.index === "function" ? d.index() : "-") +
@@ -1722,6 +1992,31 @@ function vaFillPlotter(canvas, instance, history) {
           const x = plt.x.get(item);
           canvas.drawLine(plt.offset(x, item.vaLo), plt.offset(x, item.vaHi),
             { color, relativeWidth: 1, opacity: opac });
+        }
+      }
+    }
+    // ---- v13: translucent absorption clouds at structural levels ----
+    // Independent of rowsPlot / rowOpacity so the overlay still draws
+    // when the trader thins the histogram. One bar-wide vertical strip
+    // per column of each cloud; opacity and height carry the absorbed
+    // size. Swallow-safe: a bad payload must never take the chart down.
+    const blobs = instance._plotAbsorb;
+    if (blobs && blobs.length && history && history.data) {
+      let abBudget = 4000;
+      for (let b = 0; b < blobs.length && abBudget > 0; b++) {
+        const B = blobs[b];
+        if (!B || !(B.h > 0) || !B.color) continue;
+        const opac = Math.max(0.08, Math.min(0.55, B.opac || 0.28));
+        const lo = B.price - B.h / 2, hi = B.price + B.h / 2;
+        const j0 = Math.max(0, B.i0 | 0);
+        const j1 = Math.min(history.data.length - 1, B.i1 | 0);
+        for (let j = j0; j <= j1 && abBudget > 0; j++) {
+          const item = history.get(j);
+          if (!item) continue;
+          const x = plt.x.get(item);
+          canvas.drawLine(plt.offset(x, lo), plt.offset(x, hi),
+            { color: B.color, relativeWidth: 1, opacity: opac });
+          abBudget--;
         }
       }
     }
@@ -1819,7 +2114,16 @@ module.exports = {
     calib: predef.paramSpecs.number(0, 1, 0),         // 1 = du-axis calibration probe (one screenshot maps du->pixel)
     duTime: predef.paramSpecs.number(2, 1, 0),        // du emission: 0 = bar-index, 1 = minute-slots, 2 = auto (live only)
     originShift: predef.paramSpecs.number(0, 1),      // minutes added to the layout origin (live calibration)
+    // v13 Rapid Daily / Asian / absorption overlay
+    sessionMode: predef.paramSpecs.number(1, 1, 0),   // 0 = graded NY 09:00-11:00, 1 = Asian 18:00-03:00 NY (default), 2 = both
+    acctSize: predef.paramSpecs.number(50, 25, 25),   // Rapid Daily 25 / 50 / 100
+    absorbViz: predef.paramSpecs.number(1, 1, 0),     // 1 = translucent green/red absorption clouds at levels
   },
+  // per-bar volume-at-price {price, vol, bidVol, askVol}. The sandbox's
+  // order-flow feed -- NOT the SuperDOM (chart indicators cannot read
+  // resting book). Guarded in _readProfile; missing method degrades to
+  // bar bidVolume/offerVolume.
+  requirements: { profile: true },
 };
 
 // plotter registration is the one construct Node cannot prove against the

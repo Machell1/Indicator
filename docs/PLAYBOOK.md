@@ -1,8 +1,21 @@
 # Gold POC Confluence Playbook — v4 (v5 elements backtested)
 
-**Instrument:** XAUUSD (FundedNext MT5, manual execution) with GC/MGC futures order flow (Tradovate) as the execution screen.
-**Session:** signals armed 09:00–11:00 New York only. Flat by choice, no overnight adds.
-**Tools:** TraderMachell v5.11 (formerly TraderDalePOC) + MarketProfile (POC rays) + NY/Jamaica clock on MT5; Tradovate DOM/chart beside it.
+**Instrument:** MGC (or GC) on Tradovate, FundedNext Futures **Rapid Daily**. Micros first: Rapid Daily caps 20/40/60 micro (or 2/4/6 mini) on 25K/50K/100K.
+**Session (this build's default):** Asian 18:00–03:00 New York (CME reopen through Tokyo, flat before London). `sessionMode=0` restores the graded 09:00–11:00 NY window; `=2` ORs both.
+**Account card (Rapid Daily):** DLL $500 / $1,000 / $1,250 (soft breach — day pauses). MLL EOD trailing $1,000 / $2,000 / $2,500 (account closed). Positions auto-close 15:10 CT; Asian traders should already be flat. No overnight hold past that cutoff. No consistency rule; buffer rule applies to daily rewards.
+**Tools:** TraderMachell on a 1-minute GC/MGC chart (this indicator) + Tradovate DOM beside it for resting size. Custom indicators **cannot** read the SuperDOM — the green/red clouds are executed bid/ask at the level (`d.profile()`), which is the order-flow data the sandbox actually provides.
+
+---
+
+## Rapid Daily / Asian — how this build differs from the graded NY playbook
+
+The structure is the same (prior-session POC, ACCUM rotation, wait for absorption → initiative, stop at the reaction point). Three things change:
+
+1. **Window.** Default 18:00–03:00 NY, wrapping midnight. Sunday 18:00 ET open is in-window. The +0.40R / +0.28R tags were measured on NY hours / a no-TOD harness — **treat Asian signals as ungraded**. Same machines, different liquidity. Size as if the edge is unproven.
+2. **Absorption visual.** Translucent **green** (bids absorbing sells / support) or **red** (offers absorbing buys / resistance) clouds sit on the structural levels (prev POC / VAH / VAL, ACCUM, naked POCs, developing POC). Size (width, height, opacity) scales with contracts absorbed; the label is `POC BID ABS 1.2k` / `VAH ASK ABS 840`. That is the execution read. The old orange diamond still marks a *graded signature* churn bar; the cloud is the continuous order-flow picture.
+3. **Risk.** Stay inside the DLL with room for commissions and float (DLL counts running losses). Suggested self-stop ~50% of DLL ($250 / $500 / $625). Max 2 trades / session. Prefer MGC. Flat by 03:00 NY — do not hold into London on this plan, and never into 15:10 CT.
+
+The original 09:00–11:00 NY playbook below is unchanged and remains the evidence-graded routine. Switch `sessionMode=0` to trade it.
 
 Every rule below carries its evidence grade:
 **[E]** = tested and survived (real-delta futures study or replicated MT5 backtest) · **[L]** = tested, leans right, underpowered · **[D]** = Dale's teaching, untested or untestable mechanically · **[R]** = risk discipline, not edge.

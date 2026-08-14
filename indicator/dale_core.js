@@ -93,9 +93,23 @@ function sessionKey(tMs) {
   const dd = String(d.getUTCDate()).padStart(2, '0');
   return `${d.getUTCFullYear()}-${mm}-${dd}`;
 }
+// Hour-in-window with midnight wrap: a window whose start > end (Asian
+// 18:00-03:00 NY) is the union of [start, 24) and [0, end). Multiple
+// windows (sessionMode=2: Asian + NY) are OR'd via cfg.windows.
+function hourInWindow(h, start, end) {
+  if (!(start < end)) return h >= start || h < end;
+  return h >= start && h < end;
+}
 function inNyWindow(tMs, cfg) {
   const h = nyParts(tMs).hour;
-  return h >= cfg.nyStartHour && h < cfg.nyEndHour;
+  const windows = cfg.windows;
+  if (windows && windows.length) {
+    for (let i = 0; i < windows.length; i++) {
+      if (hourInWindow(h, windows[i].start, windows[i].end)) return true;
+    }
+    return false;
+  }
+  return hourInWindow(h, cfg.nyStartHour, cfg.nyEndHour);
 }
 
 // exact floor division matching CPython's float `//` (float_divmod), so bin
@@ -653,7 +667,8 @@ class DaleCore {
     else if (P.touchedAt >= 0) out.status = 'TOUCHED - waiting for absorption-initiative';
     else if (P.armed && inWin)
       out.status = P.side ? 'armed: buy the retest from above' : 'armed: sell the retest from below';
-    else if (P.armed) out.status = 'armed - outside the 09:00-11:00 NY window';
+    else if (P.armed) out.status = 'armed - outside the ' +
+      (cfg.windowLabel || '09:00-11:00 NY') + ' window';
     else out.status = 'waiting: price has not moved 1 ATR from the level';
 
     // ------- flow-quit alert on the open prior-POC signal -------
@@ -679,5 +694,6 @@ class DaleCore {
 
 // Node + Tradovate-module compatibility
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { DaleCore, buildProfile, stopBehindLVN, sessionKey, nyOffsetHours, CFG };
+  module.exports = { DaleCore, buildProfile, stopBehindLVN, sessionKey,
+    nyOffsetHours, nyParts, inNyWindow, hourInWindow, CFG };
 }
