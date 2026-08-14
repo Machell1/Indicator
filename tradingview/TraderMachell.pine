@@ -1,19 +1,15 @@
 //@version=6
 // ============================================================================
-// TraderMachell — Dale Volume-Profile Model (TradingView port)
-// Mirrors indicator/dale_core.js + clean signal shell from indicator/wrapper.js
-//
-// CME session roll 17:00 New York · Asian + NY trade windows · pre-London blackout
-// Prior-POC: touch → absorption → initiative → reaction SL → prior-POC TP
-// ACCUM rotation retest with LVN stop + prior-POC target stack
-// Clean default: BUY/SELL labels, SL/TP rays, risk/reward zone shading
-//
-// Delta: intrabar up/down split via request.security_lower_tf when available;
-// otherwise range-position proxy (disclosed in research mode panel).
+// TraderMachell — Dale Volume-Profile Model (TradingView)
+// SVP layout (CantoLab / F3s conventions): prior + developing histograms,
+// POC/VAH/VAL lines, VA fills/brackets, Blue→Red session ramp.
+// Orderflow: wick absorption bubbles + delta imbalance markers.
+// ACCUM rotation box + flexible profile. Clean trade bracket labels.
+// Engine: same graded profile math as indicator/dale_core.js (not cloned TV code).
 // ============================================================================
 
 indicator("TraderMachell — Dale Volume-Profile Model", "TraderMachell", overlay = true,
-     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 900)
 
 // ─── inputs ───────────────────────────────────────────────────────────────
 gM = "Mode"
@@ -35,16 +31,30 @@ avoidPreLon  = input.bool(true, "Skip pre-London hour (manipulation)", group = g
 preLonStart  = input.int(2, "Pre-London start", minval = 0, maxval = 23, group = gS)
 preLonEnd    = input.int(3, "Pre-London end", minval = 0, maxval = 23, group = gS)
 
-gP = "Profiles (research mode)"
+gP = "Volume profile histogram"
 rows       = input.int(80, "Profile rows", minval = 20, maxval = 160, group = gP)
 vaIn       = input.float(70, "Value area %", minval = 50, maxval = 90, group = gP)
-showPrev   = input.bool(true, "Prior session POC / VAH / VAL", group = gP)
-showDev    = input.bool(false, "Developing session profile", group = gP)
+showPrevHist = input.bool(true, "Prior session histogram", group = gP)
+showDevHist  = input.bool(true, "Developing session histogram", group = gP)
+showPrevVA   = input.bool(true, "Prior VA fill + bracket", group = gP)
+showDevVA    = input.bool(true, "Developing VA fill + bracket", group = gP)
+histMaxW     = input.int(120, "Max histogram width (bars)", minval = 30, maxval = 300, group = gP)
+vaFillOp     = input.int(14, "VA fill opacity %", minval = 3, maxval = 40, group = gP)
+showPrev   = input.bool(true, "Prev POC / VAH / VAL lines", group = gP)
+showDevLines = input.bool(true, "Developing POC / VAH / VAL lines", group = gP)
 showNPOC   = input.bool(false, "Naked POC rays", group = gP)
 nakedMax   = input.int(6, "Naked POC count", minval = 1, maxval = 20, group = gP)
-showFlex   = input.bool(false, "ACCUM rotation histogram", group = gP)
-flexRows   = input.int(40, "Histogram rows", minval = 10, maxval = 80, group = gP)
-flexW      = input.int(60, "Histogram width (bars)", minval = 10, maxval = 200, group = gP)
+
+gOF = "Orderflow & absorption"
+showBubbles  = input.bool(true, "Absorption bubbles (wick rejection)", group = gOF)
+showOFMarks  = input.bool(true, "Delta imbalance markers", group = gOF)
+bubbleLook   = input.int(50, "Bubble volume lookback", minval = 10, maxval = 200, group = gOF)
+absVolMult   = input.float(1.3, "Absorption volume x median", step = 0.1, group = gOF)
+absRngMult   = input.float(0.9, "Absorption max range x median", step = 0.1, group = gOF)
+wickMinPct   = input.float(0.30, "Min wick % of bar range", step = 0.05, group = gOF)
+showAccumBox = input.bool(true, "ACCUM rotation box + histogram", group = gOF)
+flexRows   = input.int(40, "ACCUM histogram rows", minval = 10, maxval = 80, group = gOF)
+flexW      = input.int(60, "ACCUM histogram width", minval = 10, maxval = 200, group = gOF)
 
 gSig = "Signals"
 useAccum   = input.bool(true, "ACCUM rotation retest", group = gSig)
@@ -250,6 +260,67 @@ f_tpOrd(long) =>
 f_entryOrd(long, kind) =>
     kind == "ACCUM" ? (long ? "BUY LIMIT" : "SELL LIMIT") : (long ? "BUY MKT" : "SELL MKT")
 
+// Blue→Red time ramp (MP55396 semantics, display-only)
+f_rampColor(float t) =>
+    float T = math.max(0.0, math.min(1.0, t))
+    color.rgb(math.round(255 * T), 0, math.round(255 * (1.0 - T)))
+
+// Draw histogram rows into box array; returns POC row coverage for prominence
+f_pushHistogram(array<box> boxes, int x0, int x1, float gLo, float st, array<float> bins,
+     float poc, float vah, float val, bool useRamp, int rowOp, array<float> barTimes) =>
+    float mx = array.max(bins)
+    int nb = array.size(bins)
+    int span = math.max(1, x1 - x0)
+    int pocRow = array.indexof(bins, mx)
+    float pocCov = 0.0
+    if nb > 0 and mx > 0
+        int drawn = 0
+        for k = 0 to nb - 1
+            float v = array.get(bins, k)
+            if v <= mx * 0.03
+                continue
+            float y0 = gLo + k * st
+            float y1 = y0 + st
+            int w = math.max(1, int(span * v / mx * 0.85))
+            float t = 0.5
+            if useRamp
+                if array.size(barTimes) > 0 and k < array.size(barTimes)
+                    t := array.get(barTimes, k)
+                else if nb > 0
+                    t := k / nb
+            color bg = useRamp ? color.new(f_rampColor(t), 100 - rowOp) :
+                 color.new(#5A6E82, 100 - rowOp)
+            bool inVa = y0 + st * 0.5 >= val and y0 + st * 0.5 <= vah
+            if inVa
+                bg := color.new(#7C93A8, 100 - math.min(rowOp + 6, 90))
+            if k == pocRow
+                pocCov := v / mx
+            array.push(boxes, box.new(x0, y1, x0 + w, y0, border_width = 0, bgcolor = bg))
+            drawn += 1
+            if drawn > 55
+                break
+    pocCov
+
+f_pushBracket(array<line> lines, int x0, int x1, float vah, float val, color col) =>
+    array.push(lines, line.new(x0, vah, x1, vah, color = col, width = 1))
+    array.push(lines, line.new(x0, val, x1, val, color = col, width = 1))
+    array.push(lines, line.new(x0, vah, x0, val, color = col, width = 1))
+    array.push(lines, line.new(x1, vah, x1, val, color = col, width = 1))
+
+// Mean bar index per profile row for time-ramp coloring
+f_rowTimes(array<float> hs, array<float> ls, array<float> vs, float gLo, float st, int nrows) =>
+    array<float> times = array.new_float(nrows + 90, 0.5)
+    int n = array.size(ls)
+    if n > 1
+        for i = 0 to n - 1
+            int a = math.max(int((array.get(ls, i) - gLo) / st), 0)
+            int z = math.max(a, int((array.get(hs, i) - gLo) / st))
+            float tf = i / (n - 1)
+            for k = a to z
+                if k < array.size(times)
+                    array.set(times, k, tf)
+    times
+
 // ─── rolling buffers ───────────────────────────────────────────────────────
 int sk = f_sessionKey()
 bool newSess = ta.change(sk) != 0
@@ -277,6 +348,18 @@ var float dVah = na
 var float dVal = na
 var int sCount = 0
 var float atrV = na
+var int sessStartBar = 0
+var int lastSessStartBar = 0
+var int lastSessEndBar = na
+var array<float> savedBins = array.new_float()
+var float savedGrid = na
+var float savedStep = na
+var float savedPoc = na
+var float savedVah = na
+var float savedVal = na
+var array<float> devBins = array.new_float()
+var float devGrid = na
+var float devStep = na
 
 const int LIQ_MIN_VOL = 2000
 const int LIQ_MIN_BARS = 120
@@ -291,6 +374,13 @@ if newSess and array.size(sL) > 5
             array.push(nakeds, pPoc)
             while array.size(nakeds) > nakedMax
                 array.shift(nakeds)
+        savedBins := array.copy(b1)
+        savedGrid := g1
+        savedStep := s1
+        savedPoc := p1
+        savedVah := a1
+        savedVal := v1
+        lastSessEndBar := bar_index - 1
         pPoc := p1
         pVah := a1
         pVal := v1
@@ -307,6 +397,8 @@ if newSess and array.size(sL) > 5
     array.clear(sR)
     array.clear(sD)
     sCount := 0
+    lastSessStartBar := sessStartBar
+    sessStartBar := bar_index
 
 array.push(sH, high)
 array.push(sL, low)
@@ -336,11 +428,14 @@ if showNPOC and array.size(nakeds) > 0
             if low <= lv and high >= lv
                 array.remove(nakeds, i)
 
-if showDev and sCount > 30 and bar_index % 10 == 0
+if showDevLines and sCount >= 10
     [p2, a2, v2, g2, s2, b2] = f_profile(sH, sL, sV, rows)
     dPoc := p2
     dVah := a2
     dVal := v2
+    devBins := array.copy(b2)
+    devGrid := g2
+    devStep := s2
 
 // ATR: mean 1-min range × (30 / barMin)
 if array.size(rR) > 0
@@ -673,6 +768,63 @@ if not na(atrV) and atrV > 0 and barstate.isconfirmed
                         sigSell := not longAcc
                         status := (longAcc ? "BUY" : "SELL") + " ACCUM retest"
 
+// ─── orderflow: wick absorption bubbles + delta marks ────────────────────────
+var array<int> bblX = array.new_int()
+var array<float> bblY = array.new_float()
+var array<bool> bblBuy = array.new_bool()
+var array<string> bblTxt = array.new_string()
+var array<int> ofX = array.new_int()
+var array<float> ofY = array.new_float()
+var array<bool> ofDn = array.new_bool()
+bool bubbleBar = false
+
+if (showBubbles or showOFMarks) and barstate.isconfirmed and array.size(sV) >= 5
+    int bl = math.min(bubbleLook, array.size(sV))
+    if bl > 0
+        array<float> wV = array.new_float()
+        array<float> wR = array.new_float()
+        array<float> wD = array.new_float()
+        for i = 0 to bl - 1
+            int idx = array.size(sV) - 1 - i
+            array.push(wV, array.get(sV, idx))
+            array.push(wR, array.get(sR, idx))
+            array.push(wD, math.abs(array.get(sD, idx)))
+        float vmed = f_median(wV)
+        float rmed = f_median(wR)
+        float d90 = f_pctile(wD, 90)
+        float rng = high - low
+        if rng > syminfo.mintick and vmed > 0 and rmed > 0
+            if showBubbles and volume >= absVolMult * vmed and rng <= absRngMult * rmed * 2.5
+                float bodyLo = math.min(open, close)
+                float bodyHi = math.max(open, close)
+                float lowerW = bodyLo - low
+                float upperW = high - bodyHi
+                if lowerW / rng >= wickMinPct and dlt < 0
+                    bubbleBar := true
+                    array.push(bblX, bar_index)
+                    array.push(bblY, low)
+                    array.push(bblBuy, true)
+                    array.push(bblTxt, "BID ABSORB")
+                if upperW / rng >= wickMinPct and dlt > 0
+                    bubbleBar := true
+                    array.push(bblX, bar_index)
+                    array.push(bblY, high)
+                    array.push(bblBuy, false)
+                    array.push(bblTxt, "ASK ABSORB")
+            if showOFMarks and math.abs(dlt) >= d90 and volume >= 1.5 * vmed
+                array.push(ofX, bar_index)
+                array.push(ofY, close)
+                array.push(ofDn, dlt < 0)
+    while array.size(bblX) > 80
+        array.shift(bblX)
+        array.shift(bblY)
+        array.shift(bblBuy)
+        array.shift(bblTxt)
+    while array.size(ofX) > 40
+        array.shift(ofX)
+        array.shift(ofY)
+        array.shift(ofDn)
+
 // Status line
 if na(pPoc)
     status := "waiting: no prior-session profile yet"
@@ -696,10 +848,126 @@ bool showLvl = showLevels or not cleanSignals
 plot(showLvl and showPrev ? pPoc : na, "PREV POC", cPoc, 2, plot.style_linebr)
 plot(showLvl and showPrev ? pVah : na, "PREV VAH", cVa, 1, plot.style_linebr)
 plot(showLvl and showPrev ? pVal : na, "PREV VAL", cVa, 1, plot.style_linebr)
-plot((not cleanSignals and showDev) ? dPoc : na, "dPOC", cDev, 1, plot.style_linebr)
-plot((not cleanSignals and showDev) ? dVah : na, "dVAH", color.new(cDev, 50), 1, plot.style_linebr)
-plot((not cleanSignals and showDev) ? dVal : na, "dVAL", color.new(cDev, 50), 1, plot.style_linebr)
-plot((not cleanSignals and useAccum) ? accLvl : na, "ACCUM", cAcc, 2, plot.style_linebr)
+plot(showDevLines ? dPoc : na, "DEV POC", cDev, 1, plot.style_dashed)
+plot(showDevLines ? dVah : na, "DEV VAH", color.new(cDev, 40), 1, plot.style_dashed)
+plot(showDevLines ? dVal : na, "DEV VAL", color.new(cDev, 40), 1, plot.style_dashed)
+plot(useAccum ? accLvl : na, "ACCUM POC", cAcc, 2, plot.style_linebr)
+
+// ─── SVP histogram + VA layers (CantoLab / F3s-style layout) ───────────────
+var array<box> histBoxes = array.new<box>()
+var array<line> histLines = array.new<line>()
+var array<label> histLabels = array.new<label>()
+var array<label> bblLabels = array.new<label>()
+var array<label> ofLabels = array.new<label>()
+var array<box> accumBoxes = array.new<box>()
+
+if barstate.islast
+    while array.size(histBoxes) > 0
+        box.delete(array.pop(histBoxes))
+    while array.size(histLines) > 0
+        line.delete(array.pop(histLines))
+    while array.size(histLabels) > 0
+        label.delete(array.pop(histLabels))
+    while array.size(bblLabels) > 0
+        label.delete(array.pop(bblLabels))
+    while array.size(ofLabels) > 0
+        label.delete(array.pop(ofLabels))
+    while array.size(accumBoxes) > 0
+        box.delete(array.pop(accumBoxes))
+
+    int devX0 = sessStartBar
+    int devX1 = bar_index
+    int devSpan = math.min(histMaxW, math.max(1, devX1 - devX0))
+
+    // Prior VA zone extending into current session (jmosullivan convention)
+    if showPrevVA and not na(pVah) and not na(pVal) and devX1 > devX0
+        array.push(histBoxes, box.new(devX0, pVah, devX1, pVal,
+             border_width = 0, bgcolor = color.new(cVa, 100 - vaFillOp)))
+        f_pushBracket(histLines, devX0, devX1, pVah, pVal, color.new(cVa, 30))
+
+    // Developing VA fill + bracket in session box
+    if showDevVA and not na(dVah) and not na(dVal) and devSpan > 5
+        array.push(histBoxes, box.new(devX0, dVah, devX1, dVal,
+             border_width = 0, bgcolor = color.new(cDev, 100 - vaFillOp - 4)))
+        f_pushBracket(histLines, devX0, devX0 + devSpan, dVah, dVal, color.new(cDev, 35))
+
+    // Prior session histogram (finalized session box, Blue→Red ramp)
+    if showPrevHist and array.size(savedBins) > 0 and not na(savedGrid) and not na(savedStep)
+        int px0 = lastSessStartBar
+        int px1 = na(lastSessEndBar) ? px0 + devSpan : math.min(px0 + histMaxW, lastSessEndBar)
+        if px1 > px0
+            float cov = f_pushHistogram(histBoxes, px0, px1, savedGrid, savedStep, savedBins,
+                 savedPoc, savedVah, savedVal, true, 22, array.new_float())
+            array.push(histLines, line.new(px0, savedPoc, px1, savedPoc,
+                 color = cov >= 0.8 ? #FFFF00 : #FFFFFF, width = cov >= 0.8 ? 3 : 1))
+            int plx = px1 + 2
+            array.push(histLabels, label.new(plx, savedVah, "PREV VAH " + str.tostring(savedVah, format.mintick),
+                 style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny))
+            array.push(histLabels, label.new(plx, savedPoc, "PREV POC " + str.tostring(savedPoc, format.mintick),
+                 style = label.style_label_left, color = color.new(cPoc, 20), textcolor = cPoc, size = size.tiny))
+            array.push(histLabels, label.new(plx, savedVal, "PREV VAL " + str.tostring(savedVal, format.mintick),
+                 style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny))
+
+    // Developing session histogram (live SVP box)
+    if showDevHist and array.size(devBins) > 0 and not na(devGrid) and not na(devStep) and devSpan > 5
+        array<float> devTimes = f_rowTimes(sH, sL, sV, devGrid, devStep, rows)
+        float dcov = f_pushHistogram(histBoxes, devX0, devX0 + devSpan, devGrid, devStep, devBins,
+             dPoc, dVah, dVal, true, 28, devTimes)
+        array.push(histLines, line.new(devX0, dPoc, devX0 + devSpan, dPoc,
+             color = dcov >= 0.8 ? color.new(cDev, 0) : cDev, width = dcov >= 0.8 ? 3 : 1, style = line.style_dashed))
+        int dlx = devX0 + devSpan + 2
+        array.push(histLabels, label.new(dlx, dVah, "DEV VAH " + str.tostring(dVah, format.mintick),
+             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny))
+        array.push(histLabels, label.new(dlx, dPoc, "DEV POC " + str.tostring(dPoc, format.mintick),
+             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny))
+        array.push(histLabels, label.new(dlx, dVal, "DEV VAL " + str.tostring(dVal, format.mintick),
+             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny))
+
+    // ACCUM rotation box + flexible profile histogram
+    if showAccumBox and not na(accLvl) and array.size(accBins) > 0 and not na(accGrid) and not na(accBar)
+        float mxA = array.max(accBins)
+        if mxA > 0
+            int ax0 = math.max(accBar - flexW, bar_index - 300)
+            int ax1 = accBar + 4
+            array.push(accumBoxes, box.new(ax0, accVah, ax1, accVal,
+                 border_width = 1, border_color = color.new(cAcc, 50), bgcolor = color.new(cAcc, 92)))
+            array.push(histLabels, label.new(ax1 + 2, accLvl, "ACCUM POC " + str.tostring(accLvl, format.mintick),
+                 style = label.style_label_left, color = color.new(cAcc, 20), textcolor = cAcc, size = size.tiny))
+            int abN = array.size(accBins)
+            if abN > 0
+                for k = 0 to abN - 1
+                float vv = array.get(accBins, k)
+                if vv > 0
+                    int w = int(flexW * vv / mxA)
+                    if w > 0
+                        float y0 = accGrid + k * accStep
+                        array.push(accumBoxes, box.new(ax0, y0 + accStep, ax0 + w, y0,
+                             border_width = 0, bgcolor = color.new(cAcc, vv >= mxA * 0.98 ? 25 : 65)))
+
+    // Absorption bubbles (wick rejection — profitprotrading / footprint semantics)
+    int bN = array.size(bblX)
+    if showBubbles and bN > 0
+        for bi = 0 to bN - 1
+            bool isBuy = array.get(bblBuy, bi)
+            color bc = isBuy ? cBidAbs : cAskAbs
+            int bx = array.get(bblX, bi)
+            float by = array.get(bblY, bi)
+            string bt = array.get(bblTxt, bi)
+            array.push(bblLabels, label.new(bx, by, "\u25CF", style = label.style_none,
+                 textcolor = bc, size = size.large))
+            array.push(bblLabels, label.new(bx, by, bt,
+                 style = isBuy ? label.style_label_up : label.style_label_down,
+                 color = color.new(bc, 25), textcolor = #FFFFFF, size = size.tiny))
+
+    // Delta imbalance orderflow markers
+    int oN = array.size(ofX)
+    if showOFMarks and oN > 0
+        for oi = 0 to oN - 1
+            bool dn = array.get(ofDn, oi)
+            color oc = dn ? cSell : cBuy
+            string ot = dn ? "OF \u25BC" : "OF \u25B2"
+            array.push(ofLabels, label.new(array.get(ofX, oi), array.get(ofY, oi), ot,
+                 style = label.style_none, textcolor = oc, size = size.small))
 
 // ─── signal graphics ─────────────────────────────────────────────────────────
 var array<line> sigLines = array.new<line>()
@@ -709,28 +977,38 @@ var array<label> sigLabels = array.new<label>()
 var label lblPoc = na
 var label lblVah = na
 var label lblVal = na
-var label lblAcc = na
+var label lblDPoc = na
+var label lblDVah = na
+var label lblDVal = na
 
 if barstate.islast
     label.delete(lblPoc)
     label.delete(lblVah)
     label.delete(lblVal)
-    label.delete(lblAcc)
+    label.delete(lblDPoc)
+    label.delete(lblDVah)
+    label.delete(lblDVal)
     lblPoc := na
     lblVah := na
     lblVal := na
-    lblAcc := na
+    lblDPoc := na
+    lblDVah := na
+    lblDVal := na
     int lx = bar_index + 12
     if showLvl and showPrev and not na(pPoc)
         lblPoc := label.new(lx, pPoc, "PREV POC  " + str.tostring(pPoc, format.mintick),
              style = label.style_label_left, color = color.new(cPoc, 20), textcolor = cPoc, size = size.tiny)
-        lblVah := label.new(lx, pVah, "VAH  " + str.tostring(pVah, format.mintick),
+        lblVah := label.new(lx, pVah, "PREV VAH  " + str.tostring(pVah, format.mintick),
              style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny)
-        lblVal := label.new(lx, pVal, "VAL  " + str.tostring(pVal, format.mintick),
+        lblVal := label.new(lx, pVal, "PREV VAL  " + str.tostring(pVal, format.mintick),
              style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny)
-    if not na(accLvl) and (not cleanSignals or useAccum)
-        lblAcc := label.new(lx, accLvl, "ACCUM POC  " + str.tostring(accLvl, format.mintick),
-             style = label.style_label_left, color = color.new(cAcc, 20), textcolor = cAcc, size = size.tiny)
+    if showDevLines and not na(dPoc)
+        lblDPoc := label.new(lx, dPoc, "DEV POC  " + str.tostring(dPoc, format.mintick),
+             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny)
+        lblDVah := label.new(lx, dVah, "DEV VAH  " + str.tostring(dVah, format.mintick),
+             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny)
+        lblDVal := label.new(lx, dVal, "DEV VAL  " + str.tostring(dVal, format.mintick),
+             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny)
 
 if sigBuy or sigSell
     color sigCol = sigBuy ? cBuy : cSell
@@ -822,37 +1100,23 @@ if absorbZones and barstate.islast
                 array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
                      border_width = 0, bgcolor = color.new(cAskAbs, 100 - absorbOpacity)))
 
-// ─── research UI: naked POC + flex histogram + tags ───────────────────────────
+// ─── research UI: naked POC rays ─────────────────────────────────────────────
 var array<line> nkL = array.new<line>()
 var array<label> nkT = array.new<label>()
-var array<box> fBox = array.new<box>()
 
 if not cleanSignals and barstate.islast
     while array.size(nkL) > 0
         line.delete(array.pop(nkL))
     while array.size(nkT) > 0
         label.delete(array.pop(nkT))
-    while array.size(fBox) > 0
-        box.delete(array.pop(fBox))
     if showNPOC and array.size(nakeds) > 0
-        for i = 0 to array.size(nakeds) - 1
+        int nN = array.size(nakeds)
+        for i = 0 to nN - 1
             float lv = array.get(nakeds, i)
             array.push(nkL, line.new(bar_index - 300, lv, bar_index + 15, lv,
                  color = color.new(cNak, 35), style = line.style_dotted))
             array.push(nkT, label.new(bar_index + 15, lv, "NPOC " + str.tostring(lv, format.mintick),
                  style = label.style_label_left, color = color.new(#12161C, 20), textcolor = cNak, size = size.tiny))
-    if showFlex and array.size(accBins) > 0 and not na(accGrid) and not na(accStep) and not na(accBar)
-        float mx = array.max(accBins)
-        if mx > 0
-            for k = 0 to array.size(accBins) - 1
-                float vv = array.get(accBins, k)
-                if vv > 0
-                    int w = int(flexW * vv / mx)
-                    if w > 0
-                        float y0 = accGrid + k * accStep
-                        int xb = math.max(accBar, bar_index - 300)
-                        array.push(fBox, box.new(xb, y0 + accStep, xb + w, y0,
-                             border_width = 0, bgcolor = color.new(cAcc, vv >= mx * 0.98 ? 30 : 72)))
 
 // ─── status panel (research mode) ────────────────────────────────────────────
 var table t = table.new(position.top_left, 2, 6, bgcolor = color.new(#0E1218, 8),
@@ -876,10 +1140,12 @@ if showTbl and barstate.islast
          "   n=" + str.tostring(array.size(nakeds)), cAcc)
     f_kv(4, "ATR / last R", (na(atrV) ? "—" : str.tostring(atrV, format.mintick)) +
          (na(eSl) or na(ePx) ? "" : "   R=" + str.tostring(math.abs(ePx - eSl), format.mintick)), #7C8B9C)
-    f_kv(5, "Delta source", deltaReal ? "intrabar " + lowTf : "range proxy (ungraded)",
-         deltaReal ? #26A17B : #E0A33A)
+    f_kv(5, "Layers", (showPrevHist ? "prev-hist " : "") + (showDevHist ? "dev-hist " : "") +
+         (showBubbles ? "bubbles " : "") + (showOFMarks ? "orderflow" : ""), #7C8B9C)
 
 alertcondition(sigBuy, "TraderMachell BUY",
      "TraderMachell BUY — check chart for ENTRY / STOP / LIMIT bracket")
 alertcondition(sigSell, "TraderMachell SELL",
      "TraderMachell SELL — check chart for ENTRY / STOP / LIMIT bracket")
+alertcondition(bubbleBar, "Absorption bubble",
+     "TraderMachell absorption bubble — check BID/ASK ABSORB label")
