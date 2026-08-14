@@ -157,7 +157,8 @@ const COLORS = {
   dev: "#4DB6AC",         // developing dPOC/dVAH/dVAL (display-only levels)
   htf: "#C9962B", accum: "#FFD54F", leg: "#26C6DA",
   naked: "#E53935", nakedTxt: "#EF9A9A",
-  buy: "#00C853", sell: "#FF5252", tp: "#00C853", sl: "#FF5252",
+  buy: "#00C853", sell: "#FF5252", tp: "#00E676", sl: "#FF5252",
+  buySig: "#00E676", sellSig: "#FF1744",
   absorb: "#FFA500", bidAbsorb: "#00C853", offerAbsorb: "#FF5252",
   conflu: "#FF8C00", warn: "#FFA500",
   status: "#E0E0E0", dim: "#9E9E9E",
@@ -292,6 +293,36 @@ function pxrect(x, wPx, pLo, pHi) {
   return { tag: "Rectangle",
     position: { x: duX(x), y: du(RECT_Y_ANCHOR === "bottom" ? pLo : pHi) },
     size: { width: px(wPx), height: du(pHi - pLo) } };
+}
+
+// Professional signal layer: entry + SL/TP rays, zone outlines, right labels
+function addSignalGraphics(items, labels, tradePlot, mi, endI, ev, fmt, O) {
+  const long = ev.long;
+  const col = long ? COLORS.buySig : COLORS.sellSig;
+  const side = long ? "BUY" : "SELL";
+  const tMs = ev.tMs;
+  const ext = Math.max(mi + 1, endI + 2);
+  items.push(ray("enL" + tMs, mi, ev.entry, "#78909C", 1, 3));
+  items.push(ray("slL" + tMs, mi, ev.sl, COLORS.sl, 2, 2));
+  items.push(ray("tpL" + tMs, mi, ev.tp, COLORS.tp, 2, 2));
+  if (ext > mi + 1) {
+    items.push(box("rkZ" + tMs, mi, ext,
+      Math.max(ev.entry, ev.sl), Math.min(ev.entry, ev.sl), COLORS.sl, 3));
+    items.push(box("rwZ" + tMs, mi, ext,
+      Math.max(ev.entry, ev.tp), Math.min(ev.entry, ev.tp), COLORS.tp, 3));
+  }
+  items.push(txt("sgA" + tMs, mi, ev.entry, long ? "\u25B2" : "\u25BC", col,
+    long ? -18 : 18, { fontSize: 22, fontWeight: "bold" }, "centerMiddle"));
+  items.push(txt("sg" + tMs, mi, ev.entry, side, col, long ? -40 : 40,
+    { fontSize: 14, fontWeight: "bold" }, "centerMiddle"));
+  labels.push({ key: "enT" + tMs, price: ev.entry,
+    text: side + "  " + fmt(ev.entry), color: col, font: FONT_SM });
+  labels.push({ key: "slT" + tMs, price: ev.sl,
+    text: "SL  " + fmt(ev.sl), color: COLORS.sl, font: FONT_SM });
+  labels.push({ key: "tpT" + tMs, price: ev.tp,
+    text: "TP  " + fmt(ev.tp), color: COLORS.tp, font: FONT_SM });
+  if (O.tradeZones)
+    tradePlot.push({ j0: mi, j1: endI, entry: ev.entry, sl: ev.sl, tp: ev.tp, long, key: tMs });
 }
 
 // ---- histogram -----------------------------------------------------------
@@ -540,7 +571,7 @@ class traderMachell {
       preLonEndHour: Math.max(0, Math.min(23, pNum(p.preLonEnd, 3))),
       accountSize: [25000, 50000, 100000].indexOf(Number(p.accountSize)) >= 0
         ? Number(p.accountSize) : 100000,
-      trackActivity: pBool(p.trackActivity, true),
+      trackActivity: pBool(p.trackActivity, false),
       activityMaxIdleDays: Math.max(1, Math.min(30, pNum(p.activityMaxDays, 2))),
     });
   }
@@ -552,12 +583,15 @@ class traderMachell {
     const p = this.props || {};
     return {
       duMode: pBool(p.scaledWidths, true),   // du widths live-proven 2026-08-09
-      dev: pBool(p.devProfile, true),        // developing session profile (SVP)
-      rowsPlot: pBool(p.rowsPlot, true),     // translucent plotter rows (v10)
-      edge: pBool(p.edgeProfile, true),      // right-edge pinned live profile (v12)
+      clean: pBool(p.cleanSignals, true),  // 1 = signal-only pro chart (default)
+      showLevels: pBool(p.showLevels, true),
+      tradeZones: pBool(p.tradeZones, true),
+      dev: pBool(p.devProfile, false),
+      rowsPlot: pBool(p.rowsPlot, false),     // translucent plotter rows (v10)
+      edge: pBool(p.edgeProfile, false),      // right-edge pinned live profile (v12)
       edgeW: pNum(p.edgeWidth, 140),         // edge profile max row width, px
       edgeOff: Number.isFinite(Number(p.edgeOffset)) ? Number(p.edgeOffset) : 170,
-      nodes: pBool(p.nodes, true),           // HVN/LVN ticks on the prior profile
+      nodes: pBool(p.nodes, false),           // HVN/LVN ticks on the prior profile
       history: pBool(p.showHistory, false),
       alignTest: pBool(p.alignTest, false),
       diag: pBool(p.diag, false),
@@ -938,6 +972,13 @@ class traderMachell {
     if (!out) return items;
     const O = this._opts();
     this._syncCoreSession();
+    const fullChart = !O.clean;
+    if (O.clean) {
+      O.dev = false;
+      O.edge = false;
+      O.rowsPlot = false;
+      O.nodes = false;
+    }
     const duMode = O.duMode;
     const tcache = new Map();
     // index of the last PUSHED bar: i if the current bar is committed,
@@ -971,6 +1012,7 @@ class traderMachell {
     // 3=HTF mirror); the list is priority-sorted before the frame ends so
     // the plotter's shared stroke budget degrades least-important last.
     this._plotProfiles = [];
+    this._tradePlot = [];
     const rowsToPlotter = O.rowsPlot && duMode;
     const futureKeys = new Set();   // filled by guards below + the final scan
     const idx = (t, layer) => {
@@ -1031,7 +1073,7 @@ class traderMachell {
     // that printing the banner first silently hides them)
 
     // ---- session start marker (verifies the time anchor at a glance) ----
-    if (x0Ok && out.prevProf && out.prevProf.length) {
+    if (fullChart && x0Ok && out.prevProf && out.prevProf.length) {
       let pLo = Infinity, pHi = -Infinity, ph = 0;
       for (const r of out.prevProf) {
         if (r.price < pLo) pLo = r.price;
@@ -1045,13 +1087,13 @@ class traderMachell {
     // (v3 drew a filled band here; live 2026-08-09 proved fill alpha is
     // not honored -- it rendered as an opaque slab occluding the rows.
     // Dale's zone, rebuilt on proven line primitives.)
-    if (x0Ok && out.prev && i > x0)
+    if (fullChart && x0Ok && out.prev && i > x0)
       items.push(box("vaZ", x0, i + 1, out.prev.vah, out.prev.val, COLORS.vaZone, 3));
 
     // ---- HTF composite (dark gold ghost, true mirror: grows LEFT) ----
     // px fallback cannot mirror left (negative widths are unproven), so the
     // ghost is du-mode only; rays + labels always draw.
-    if (x0Ok && duMode && out.htfRows && x0 > 2) {
+    if (fullChart && x0Ok && duMode && out.htfRows && x0 > 2) {
       // cap the mirror's max width at x0 so no row's left edge lands on a
       // negative du x (unproven coordinate region; shape is preserved --
       // rows scale proportionally to the cap)
@@ -1074,7 +1116,13 @@ class traderMachell {
     // VA bracket, and key-value text at the profile's edge. Keys carry
     // the session's own start tms (the A8 stable-key rule); widths keep
     // the v6.4 live-edge cap.
-    {
+    if (O.clean && O.showLevels && out.prev) {
+      lvl("pocL", out.prev.poc, COLORS.poc, 2, 1);
+      lvl("vahL", out.prev.vah, COLORS.va, 1, 3);
+      lvl("valL", out.prev.val, COLORS.va, 1, 3);
+    }
+
+    if (fullChart) {
       const sessions = this.core.sessions.slice(-6);
       const spEmit = [];              // one entry per session, oldest first
       for (const sess of sessions) {
@@ -1196,12 +1244,8 @@ class traderMachell {
     }
 
     // ---- the CURRENT session's box (SVP layout) ----
-    // devProfile=1 (default): the DEVELOPING session profile lives here --
-    // the classic session-volume-profile reading -- with dPOC/dVAH/dVAL
-    // rays updating as the session builds. The prior session's histogram
-    // stays in its own box (sessionProfiles below).
-    // devProfile=0: v4 layout -- prior-session histogram projected here.
-    const dev = O.dev ? this._devProfile(out) : null;
+    const dev = fullChart && O.dev ? this._devProfile(out) : null;
+    if (fullChart) {
     if (dev) {
       if (rowsToPlotter && x0Ok) {
         // v10: the developing profile moves to the TRANSLUCENT plotter
@@ -1265,7 +1309,7 @@ class traderMachell {
           COLORS.profile, COLORS.profileVA, COLORS.pocRow, wP, duMode));
       }
     }
-    if (out.prev) {
+    if (fullChart && out.prev) {
       const thin = out.prev.liquid ? "" : "  [THIN - no signals]";
       lvl("pocL", out.prev.poc, COLORS.poc, 3, 1);
       lab("pocT", out.prev.poc, "PREV POC " + fmtL(out.prev.poc) + thin, COLORS.poc);
@@ -1274,11 +1318,12 @@ class traderMachell {
       lvl("valL", out.prev.val, COLORS.va, 1, 3);
       lab("valT", out.prev.val, "VAL " + fmtL(out.prev.val), COLORS.va, FONT_SM);
     }
+    }  // end fullChart (SVP + prev labels)
 
     // ---- HVN / LVN node ticks, projected from the session start ----
     // Short, quiet ticks: dark red = low-volume pocket (where the engine's
     // stopBehindLVN sees structure), pale gold = high-volume node.
-    if (O.nodes && x0Ok) {
+    if (fullChart && O.nodes && x0Ok) {
       const nd = this._nodesOf(out);
       if (nd && (nd.lvns.length || nd.hvns.length)) {
         const tick = pr => ({ tag: "Line",
@@ -1295,7 +1340,7 @@ class traderMachell {
     }
 
     // ---- naked POC rays (Dale's signature: red, extended until tested) ----
-    if (out.nakedPocs) {
+    if (fullChart && out.nakedPocs) {
       for (let n = 0; n < out.nakedPocs.length; n++) {
         const np = out.nakedPocs[n];
         if (out.prev && Math.abs(np.poc - out.prev.poc) < 1e-9) continue; // white ray owns it
@@ -1306,7 +1351,7 @@ class traderMachell {
       }
     }
 
-    if (out.htf) {
+    if (fullChart && out.htf) {
       lvl("hpocL", out.htf.poc, COLORS.htf, 3, 1);
       lab("hpocT", out.htf.poc,
         "HTF POC " + fmtL(out.htf.poc) + " (" + out.htf.sessions + "s)", COLORS.htf);
@@ -1317,7 +1362,7 @@ class traderMachell {
     }
 
     // ---- ACCUM rotation: box + histogram + level ray ----
-    if (out.accum) {
+    if (fullChart && out.accum) {
       const ia = idx(out.accum.start, "accum");
       const ib = idx(out.accum.end, "accum");
       // section-6 audit guards: the window must be non-inverted (a stale
@@ -1368,7 +1413,7 @@ class traderMachell {
     }
 
     // ---- LEG cluster ----
-    if (out.leg) {
+    if (fullChart && out.leg) {
       lvl("legL", out.leg.level, COLORS.leg, 1, 1);
       lab("legT", out.leg.level,
         "LEG " + fmtL(out.leg.level) +
@@ -1397,17 +1442,15 @@ class traderMachell {
         const bidDom = z.bidVol >= z.offerVol;
         const col = bidDom ? COLORS.bidAbsorb : COLORS.offerAbsorb;
         const side = bidDom ? "BID" : "ASK";
-        lab("absT" + az, z.price,
-          side + " " + fmtVol(total) + (z.tag ? " @ " + z.tag : ""),
-          col, FONT_XS);
+        if (!O.clean)
+          lab("absT" + az, z.price,
+            side + " " + fmtVol(total) + (z.tag ? " @ " + z.tag : ""),
+            col, FONT_XS);
       }
       if (plots.length) this._absorbPlot = plots;
     }
 
-    // ---- marks: absorption, signals, flow-quit (noise-controlled) ----
-    // Current session: full detail. Prior sessions: signals shrink to bare
-    // arrows (showHistory=1 restores short labels); absorption and
-    // flow-quit stamps are current-session only.
+    // ---- marks: BUY/SELL signals with TP/SL ----
     let lastSig = null, lastSigIdx, lastAbsorb = null, lastAbsorbIdx;
     for (let m = 0; m < this.marks.length; m++) {
       const mk = this.marks[m];
@@ -1416,16 +1459,22 @@ class traderMachell {
       const ev = mk.ev;
       const today = mk.day === out.day;
       if (ev.kind === "absorb") {
-        if (!today || !O.absorbMarks) continue;
+        if (!today || !O.absorbMarks || O.clean) continue;
         items.push(txt("ab" + mk.tMs, mi, mk.price,
           "\u25C6", COLORS.absorb, ev.long ? 12 : -12, FONT_SM, "centerMiddle"));
         lastAbsorb = mk; lastAbsorbIdx = mi;
         continue;
       }
       if (ev.kind === "flowquit") {
-        if (!today) continue;
+        if (!today || O.clean) continue;
         items.push(txt("fq" + mk.tMs, mi, mk.price,
-          "FLOW QUIT", COLORS.conflu, 16, FONT, "centerMiddle"));
+          "EXIT", COLORS.conflu, 16, FONT, "centerMiddle"));
+        continue;
+      }
+      if (O.clean) {
+        if (!today && !O.history) continue;
+        addSignalGraphics(items, labels, this._tradePlot, mi, endIdx, ev, fmt, O);
+        if (today) { lastSig = mk; lastSigIdx = mi; }
         continue;
       }
       const col = ev.long ? COLORS.buy : COLORS.sell;
@@ -1443,14 +1492,12 @@ class traderMachell {
           ev.long ? -24 : 24, FONT_SM, "centerMiddle"));
       if (today) { lastSig = mk; lastSigIdx = mi; }
     }
-    // label the most recent absorption of the session (the diamonds carry
-    // the rest without stamping text over every churn bar)
-    if (lastAbsorb && lastAbsorbIdx !== undefined && O.absorbMarks) {
+    if (!O.clean && lastAbsorb && lastAbsorbIdx !== undefined && O.absorbMarks) {
       items.push(txt("abT", lastAbsorbIdx, lastAbsorb.price,
         "ABSORPTION", COLORS.absorb, lastAbsorb.ev.long ? 26 : -26,
         FONT_SM, "centerMiddle"));
     }
-    if (lastSig && lastSigIdx !== undefined) {
+    if (!O.clean && lastSig && lastSigIdx !== undefined) {
       const ev = lastSig.ev;
       items.push(ray("tpL", lastSigIdx, ev.tp, COLORS.tp, 2, 3));
       lab("tpT", ev.tp, "TP " + fmtL(ev.tp), COLORS.tp);
@@ -1476,7 +1523,7 @@ class traderMachell {
     // NOT A FIX: the daily-break AUTO flip still mis-places du-anchored
     // layers ~1h/day; deleting AUTO mode stays open pending the
     // 16:00-17:00 CT calib measurement.
-    if (O.edge) {
+    if (fullChart && O.edge) {
       const devE = dev || this._devProfile(out);
       if (devE) {
         const KE = "edge" + out.dayStartTms;   // A8 rule: session-keyed
@@ -1524,7 +1571,7 @@ class traderMachell {
     // path as every histogram row. The white PREV POC ray must bisect the
     // magenta row. Row entirely ABOVE the ray => platform anchors rects at
     // the TOP edge: set RECT_Y_ANCHOR = "top" and rebuild.
-    if (O.alignTest && x0Ok && out.prev && out.prevProf && out.prevProf.length) {
+    if (fullChart && O.alignTest && x0Ok && out.prev && out.prevProf && out.prevProf.length) {
       const h = out.prevProf[0].h || 0.5;
       const pLo = out.prev.poc - h / 2, pHi = out.prev.poc + h / 2;
       items.push({ tag: "Shapes", key: "alnR", global: true,
@@ -1642,11 +1689,8 @@ class traderMachell {
         "#FFFFFF", 30, FONT_SM));
     }
 
-    // ---- status banner, pinned to the viewport (fixed line slots) ----
-    // Emitted LAST so every anchor-health flag raised during the item
-    // builds above is reflected in THIS frame (frame-pinned text renders
-    // at its px coords regardless of array position; being last also
-    // keeps the banner on top).
+    // ---- status banner (full command center; hidden in clean signal mode) ----
+    if (!O.clean) {
     items.push(frameTxt("stat1", 70, 18,
       "TraderMachell  |  " + (out.sessionLabel || "Asian") +
       "  |  " + (out.status || ""), COLORS.status));
@@ -1767,6 +1811,10 @@ class traderMachell {
         (tMode ? " tdu origin=" + originTs + "+" + O.originShift + "m" : "") +
         "   props: " + dump,
         COLORS.dim, FONT_SM));
+    }
+    } else if (this._resetLoop) {
+      items.push(frameTxt("stat1", 70, 18,
+        "Chart reset required — press F5", COLORS.warn));
     }
     return items;
   }
@@ -1902,6 +1950,35 @@ function vaFillPlotter(canvas, instance, history) {
         }
       }
     }
+    // ---- translucent trade risk/reward zones (clean signal mode) ----
+    const tradePlot = instance._tradePlot;
+    if (tradePlot && tradePlot.length && pBool(props.tradeZones, true)) {
+      let tOp = Number(props.tradeZoneOpacity);
+      if (!Number.isFinite(tOp)) tOp = 18;
+      tOp = Math.max(0, Math.min(100, tOp)) / 100;
+      if (tOp > 0) {
+        let budgetT = 6000;
+        for (const T of tradePlot) {
+          if (budgetT <= 0) break;
+          const jFrom = Math.max(0, T.j0);
+          const jTo = Math.min(T.j1, history.data.length - 1);
+          const riskLo = Math.min(T.entry, T.sl);
+          const riskHi = Math.max(T.entry, T.sl);
+          const rewLo = Math.min(T.entry, T.tp);
+          const rewHi = Math.max(T.entry, T.tp);
+          for (let j = jFrom; j <= jTo && budgetT > 0; j++) {
+            const item = history.get(j);
+            if (!item) continue;
+            const x = plt.x.get(item);
+            canvas.drawLine(plt.offset(x, riskLo), plt.offset(x, riskHi),
+              { color: "#FF5252", relativeWidth: 1, opacity: tOp });
+            canvas.drawLine(plt.offset(x, rewLo), plt.offset(x, rewHi),
+              { color: "#00E676", relativeWidth: 1, opacity: tOp });
+            budgetT -= 2;
+          }
+        }
+      }
+    }
   } catch (e) { /* optional layer: swallow, never break the chart */ }
 }
 
@@ -1911,7 +1988,7 @@ function vaFillPlotter(canvas, instance, history) {
 // delivery path. Values are defensively coerced in _opts() regardless.
 module.exports = {
   name: "traderMachell",
-  description: "TraderMachell - Dale volume-profile model (tested grades)",
+  description: "TraderMachell - BUY/SELL signals with TP/SL (Dale POC model)",
   calculator: traderMachell,
   inputType: meta.InputType.BARS,
   areaChoice: meta.AreaChoice.OVERLAY,
@@ -1919,8 +1996,12 @@ module.exports = {
   params: {
     htfSessions: predef.paramSpecs.period(20),
     scaledWidths: predef.paramSpecs.number(1, 1, 0),  // 1 = du widths (live-proven, scale with zoom); 0 = px mode
-    devProfile: predef.paramSpecs.number(1, 1, 0),    // 1 = developing session profile + dPOC/dVAH/dVAL (SVP); 0 = v4 layout
-    nodes: predef.paramSpecs.number(1, 1, 0),         // 1 = HVN/LVN ticks on the prior profile
+    cleanSignals: predef.paramSpecs.number(1, 1, 0), // 1 = pro signal chart (default); 0 = full research UI
+    showLevels: predef.paramSpecs.number(1, 1, 0),    // clean mode: prior POC/VAH/VAL lines
+    tradeZones: predef.paramSpecs.number(1, 1, 0),    // translucent risk/reward shading
+    tradeZoneOpacity: predef.paramSpecs.number(18, 1, 0),
+    devProfile: predef.paramSpecs.number(0, 1, 0),    // 1 = developing session profile + dPOC/dVAH/dVAL (SVP)
+    nodes: predef.paramSpecs.number(0, 1, 0),         // 1 = HVN/LVN ticks on the prior profile
     vaFill: predef.paramSpecs.number(0, 1, 0),        // 1 = translucent VA fill via canvas plotter (verify live first)
     // paramSpecs.color is community-proven but unverified on OUR live
     // build -- guard so its absence can't kill the whole module at load
@@ -1929,8 +2010,8 @@ module.exports = {
       ? predef.paramSpecs.color("#3E7E93")
       : predef.paramSpecs.number(0, 1, 0),
     vaFillOpacity: predef.paramSpecs.number(14, 1, 0),// band opacity 0..100 (14 = trader-calibrated live; 80 = "is it drawing at all?" probe)
-    rowsPlot: predef.paramSpecs.number(1, 1, 0),      // 1 = developing rows translucent via plotter, day-wide (v10); 0 = v9.3 opaque 150-bar rows
-    edgeProfile: predef.paramSpecs.number(1, 1, 0),   // 1 = right-edge pinned live-session profile (v12, time-axis-free)
+    rowsPlot: predef.paramSpecs.number(0, 1, 0),      // 1 = developing rows translucent via plotter
+    edgeProfile: predef.paramSpecs.number(0, 1, 0),   // 1 = right-edge pinned live-session profile (v12)
     edgeWidth: predef.paramSpecs.number(140, 10, 20), // edge profile max row width, px
     edgeOffset: predef.paramSpecs.number(170, 10, 0), // px inboard from the pane edge (sits left of the community VZO at 150)
     rowOpacity: predef.paramSpecs.number(20, 1, 0),   // row opacity 0..100 (first guess -- calibrate live like the band)

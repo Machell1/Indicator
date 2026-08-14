@@ -101,7 +101,10 @@ function runModel(model, liveTail, props) {
   // shared default runs stay on the v9.3 opaque-rows path (rowsPlot: '0')
   // so parts 1/2/8's Shapes invariants keep guarding it; the v10 plotter
   // default is exercised by part 19 with its own props
-  inst.props = props || { htfSessions: 20, alignTest: 1, rowsPlot: '0' };
+  inst.props = Object.assign({
+    htfSessions: 20, alignTest: 1, rowsPlot: '0',
+    cleanSignals: '0', devProfile: '1', edgeProfile: '1', nodes: '1',
+  }, props || {});
   inst.contractInfo = { contract: 'GCQ6', product: 'GC', tickSize: 0.1 };
   inst.chartDescription = {
     underlyingType: 'MinuteBar', elementSize: 1,
@@ -352,7 +355,7 @@ if (aln.length) {
   check(items2.some(x => x.key.startsWith('sgA')), 'part2: signal arrow missing');
   check(items2.some(x => x.key.startsWith('absT')) || items2.some(x => x.key === 'abT'),
     'part2: absorption zone/label missing');
-  check(items2.some(x => x.key === 'tpL') && items2.some(x => x.key === 'slL'),
+  check(items2.some(x => x.key.startsWith('tpL')) && items2.some(x => x.key.startsWith('slL')),
     'part2: TP/SL rays missing');
   console.log('part2 forced frame:         ' + items2.length + ' items, ' +
     lab2.length + ' labels, ' + stacked + ' fanned');
@@ -539,7 +542,7 @@ if (aln.length) {
   {
     const P = 700, M = 6000;
     const inst = new Calc();
-    inst.props = { htfSessions: 20, rowsPlot: '0' };
+    inst.props = { htfSessions: 20, rowsPlot: '0', cleanSignals: '0', devProfile: '1' };
     inst.contractInfo = { tickSize: 0.1 };
     inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
     inst.init();
@@ -573,7 +576,7 @@ if (aln.length) {
   {
     const M = 6000, gapLo = M + 40, gapHi = M + 70;
     const inst = new Calc();
-    inst.props = { htfSessions: 20, rowsPlot: '0' };
+    inst.props = { htfSessions: 20, rowsPlot: '0', cleanSignals: '0', devProfile: '1' };
     inst.contractInfo = { tickSize: 0.1 };
     inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
     inst.init();
@@ -644,7 +647,7 @@ if (aln.length) {
   const sunday = bars.slice(2 * SESS, 2 * SESS + LIVE)
     .map(b => Object.assign({}, b, { tMs: b.tMs + gapMs }));
   const inst = new Calc();
-  inst.props = { htfSessions: 20, rowsPlot: '0' };
+  inst.props = { htfSessions: 20, rowsPlot: '0', cleanSignals: '0', devProfile: '1' };
   inst.contractInfo = { tickSize: 0.1 };
   inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
   inst.init();
@@ -743,6 +746,8 @@ if (aln.length) {
 {
   // 9a: fabricate an ACCUM window + naked POC born before the mirror
   const inst = A.inst;               // parts 7c already trimmed its mirror;
+  inst.props = Object.assign({}, inst.props || {},
+    { cleanSignals: '0', devProfile: '1', rowsPlot: '0' });
   const t0 = inst.tmsList[0];        // still valid: entries are the tail
   const iLast = n - 1;
   const out9 = inst.lastOut;
@@ -1171,7 +1176,8 @@ if (aln.length) {
   const src15 = bars.slice(0, 2 * 1380 + 600);   // two sessions + a tail
   const runTf = k => {
     const inst = new Calc();
-    inst.props = { htfSessions: 20, duTime: '1', rowsPlot: '0' };
+    inst.props = { htfSessions: 20, duTime: '1', rowsPlot: '0', cleanSignals: '0',
+      devProfile: '1', edgeProfile: '1', nodes: '1' };
     inst.contractInfo = { tickSize: 0.1 };
     inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: k };
     inst.init();
@@ -1223,7 +1229,7 @@ if (aln.length) {
   // 15b: live switch 1M -> 5M on a SURVIVING instance (the platform keeps
   // stale state across timeframe changes -- community-confirmed)
   const inst15 = new Calc();
-  inst15.props = { htfSessions: 20 };
+  inst15.props = { htfSessions: 20, cleanSignals: '0', devProfile: '1', rowsPlot: '0' };
   inst15.contractInfo = { tickSize: 0.1 };
   inst15.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
   inst15.init();
@@ -1286,7 +1292,7 @@ if (aln.length) {
   };
   // phase 1: healthy 5M chart (description correct)
   const inst = new Calc();
-  inst.props = { htfSessions: 20, diag: 1 };
+  inst.props = { htfSessions: 20, diag: 1, cleanSignals: '0', devProfile: '1' };
   inst.contractInfo = { tickSize: 0.1 };
   inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 5 };
   inst.init();
@@ -1339,7 +1345,7 @@ if (aln.length) {
 
   // phase 4: pathological description flapping -> escalation, alive
   const inst4 = new Calc();
-  inst4.props = { htfSessions: 20 };
+  inst4.props = { htfSessions: 20, cleanSignals: '0', devProfile: '1' };
   inst4.contractInfo = { tickSize: 0.1 };
   inst4.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
   inst4.init();
@@ -1377,7 +1383,8 @@ if (aln.length) {
     .map(b => Object.assign({}, b, { tMs: b.tMs + gapMs }));
   const all17 = thuFri.concat(sunday);
   const inst = new Calc();
-  inst.props = { htfSessions: 20, duTime: '1', diag: 1, rowsPlot: '0' };
+  inst.props = { htfSessions: 20, duTime: '1', diag: 1, rowsPlot: '0',
+    cleanSignals: '0', devProfile: '1' };
   inst.contractInfo = { tickSize: 0.1 };
   inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
   inst.init();
@@ -1465,7 +1472,7 @@ if (aln.length) {
     return [...m.values()].sort((a, b) => a.tMs - b.tMs);
   };
   const inst30 = new Calc();
-  inst30.props = { htfSessions: 20, rowsPlot: '0' };
+  inst30.props = { htfSessions: 20, rowsPlot: '0', cleanSignals: '0', devProfile: '1' };
   inst30.contractInfo = { tickSize: 0.1 };
   inst30.chartDescription = { underlyingType: 'MinuteBar', elementSize: 30 };
   inst30.init();
@@ -1510,7 +1517,7 @@ if (aln.length) {
 // real dataset). --
 {
   const inst = new Calc();
-  inst.props = { htfSessions: 20, rowsPlot: '0' };
+  inst.props = { htfSessions: 20, rowsPlot: '0', cleanSignals: '0', devProfile: '1' };
   inst.contractInfo = { tickSize: 0.1 };
   inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
   inst.init();
@@ -1537,7 +1544,7 @@ if (aln.length) {
 // and the plotter draws bar-wide vertical strips with real opacity,
 // merging same-color runs per column. rowsPlot=0 restores v9.3 exactly. --
 {
-  const R19 = runModel('A', 400, { htfSessions: 20 });  // rowsPlot defaults ON
+  const R19 = runModel('A', 400, { htfSessions: 20, rowsPlot: '1', devProfile: '1' });
   const inst = R19.inst;
   const iLast = n - 1;
   const it19 = R19.lastResult.graphics.items;
@@ -1602,7 +1609,7 @@ if (aln.length) {
 // (ACCUM/HTF), the HTF mirror grows LEFT, the list is priority-ordered,
 // and rowsPlot=0 restores every Shapes family exactly. --
 {
-  const R20 = runModel('A', 400, { htfSessions: 20 });   // rowsPlot default ON
+  const R20 = runModel('A', 400, { htfSessions: 20, rowsPlot: '1', devProfile: '1' });
   const inst = R20.inst;
   const iLast = n - 1;
   // fabricate an ACCUM window so all four families publish
@@ -1779,7 +1786,7 @@ if (aln.length) {
 // session-keyed, offset applied, survives the emitted-geometry scan,
 // duTime cannot move it, purely additive, default ON. --
 {
-  const R22 = runModel('A', 400, { htfSessions: 20 });   // edgeProfile default ON
+  const R22 = runModel('A', 400, { htfSessions: 20, edgeProfile: '1', devProfile: '1' });
   const iLast = n - 1;
   const it22 = R22.lastResult.graphics.items;
   const cont = it22.find(x => x.tag === 'Container' && x.key.startsWith('edge'));
