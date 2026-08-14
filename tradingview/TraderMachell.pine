@@ -936,13 +936,13 @@ if barstate.islast
             int abN = array.size(accBins)
             if abN > 0
                 for k = 0 to abN - 1
-                float vv = array.get(accBins, k)
-                if vv > 0
-                    int w = int(flexW * vv / mxA)
-                    if w > 0
-                        float y0 = accGrid + k * accStep
-                        array.push(accumBoxes, box.new(ax0, y0 + accStep, ax0 + w, y0,
-                             border_width = 0, bgcolor = color.new(cAcc, vv >= mxA * 0.98 ? 25 : 65)))
+                    float vv = array.get(accBins, k)
+                    if vv > 0
+                        int w = int(flexW * vv / mxA)
+                        if w > 0
+                            float y0 = accGrid + k * accStep
+                            array.push(accumBoxes, box.new(ax0, y0 + accStep, ax0 + w, y0,
+                                 border_width = 0, bgcolor = color.new(cAcc, vv >= mxA * 0.98 ? 25 : 65)))
 
     // Absorption bubbles (wick rejection — profitprotrading / footprint semantics)
     int bN = array.size(bblX)
