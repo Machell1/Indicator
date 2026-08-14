@@ -16,6 +16,7 @@
  *    little from the backtest; levels/profiles are delta-free.
  *  - Grades were measured with NO time-of-day gate; defaults trade Asian
  *    18:00-03:00 NY plus NY 09:00-11:00, skipping 02:00-03:00 pre-London.
+ *    FundedNext Rapid Daily 100K limits + 2-day activity tracker on banner.
  *  - Signals require the prior session to pass the harness liquidity gate
  *    (>= 2000 contracts, >= 120 minutes) -- thin sessions draw levels
  *    flagged [THIN] and stand down, matching how the grades were measured.
@@ -203,6 +204,10 @@ const CFG = {
   avoidPreLon: true,   // skip 1st pre-London open hour (manipulation window)
   preLonStartHour: 2,  // pre-London blackout start (NY clock)
   preLonEndHour: 3,    // pre-London blackout end (exclusive)
+  // FundedNext Rapid Daily account rules (display + activity tracking)
+  accountSize: 100000,
+  trackActivity: true,
+  activityMaxIdleDays: 2,  // min one trade within 2 FundedNext activity days
   barMinutes: 1,       // chart bar size; scales the ATR factor + session mins
   liquidMinVol: 2000,  // prior session must have traded this to be trusted
   liquidMinBars: 120,  // ...and have this many bars (harness liquidity gate)
@@ -280,6 +285,42 @@ function sessionWindowLabel(cfg) {
   if (cfg.avoidPreLon)
     label += ' (no ' + cfg.preLonStartHour + '-' + cfg.preLonEndHour + ' pre-Lon)';
   return label;
+}
+
+// FundedNext Futures Rapid Daily limits (help center / challenge terms)
+const FN_RAPID_DAILY = {
+  25000: { dll: 500, mll: 1250, buffer: 26100, profitTarget: 1500, maxPayout: 800 },
+  50000: { dll: 1000, mll: 2000, buffer: 52100, profitTarget: 3000, maxPayout: 1200 },
+  100000: { dll: 1250, mll: 2500, buffer: 102600, profitTarget: 5000, maxPayout: 2500 },
+};
+function fnRulesFor(accountSize) {
+  const sz = Number(accountSize);
+  return FN_RAPID_DAILY[sz] || FN_RAPID_DAILY[100000];
+}
+
+// FundedNext activity day rolls at 16:01 US Central (inactivity policy uses CT)
+function ctOffsetHours(tMs) {
+  const y = new Date(tMs).getUTCFullYear();
+  const dstStart = nthSundayUtcMs(y, 2, 2) + 8 * 3600e3;
+  const dstEnd = nthSundayUtcMs(y, 10, 1) + 7 * 3600e3;
+  return (tMs >= dstStart && tMs < dstEnd) ? -5 : -6;
+}
+function activityDayKey(tMs) {
+  const off = ctOffsetHours(tMs);
+  const d = new Date(tMs + off * 3600e3);
+  let dayMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const rollSec = 16 * 3600 + 61;   // 16:01:00 CT
+  const sec = d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds();
+  if (sec >= rollSec) dayMs += 86400e3;
+  const dd = new Date(dayMs);
+  const mm = String(dd.getUTCMonth() + 1).padStart(2, '0');
+  const ddN = String(dd.getUTCDate()).padStart(2, '0');
+  return `${dd.getUTCFullYear()}-${mm}-${ddN}`;
+}
+function activityDaysBetween(keyA, keyB) {
+  const a = Date.parse(keyA + 'T12:00:00Z');
+  const b = Date.parse(keyB + 'T12:00:00Z');
+  return Math.round((b - a) / 86400e3);
 }
 
 // exact floor division matching CPython's float `//` (float_divmod), so bin
@@ -409,6 +450,8 @@ class DaleCore {
     this.naked = [];          // untested session POCs (Dale's naked-POC rays)
     this.htf = null;          // composite profile {poc, vah, val}
     this.atr = 0;
+    this.lastTradeDayKey = null;   // last FundedNext activity day with a trade
+    this.activityAnchorDay = null; // chart-load anchor when no trade logged yet
     this._resetDayState();
     this.events = [];         // signal events accumulated over the run
   }
@@ -681,6 +724,27 @@ class DaleCore {
     return out.length ? out : null;
   }
 
+  recordTradeActivity(tMs) {
+    this.lastTradeDayKey = activityDayKey(tMs);
+  }
+
+  _activityOut(tMs) {
+    const cfg = this.cfg;
+    if (!cfg.trackActivity) return null;
+    const today = activityDayKey(tMs);
+    if (!this.activityAnchorDay) this.activityAnchorDay = today;
+    const ref = this.lastTradeDayKey || this.activityAnchorDay;
+    const daysSince = activityDaysBetween(ref, today);
+    const maxIdle = Math.max(1, Number(cfg.activityMaxIdleDays) || 2);
+    return {
+      daysSince, maxIdle, today,
+      lastTrade: this.lastTradeDayKey,
+      urgent: daysSince >= maxIdle - 1,
+      breach: daysSince >= maxIdle,
+      rules: fnRulesFor(cfg.accountSize),
+    };
+  }
+
   // ---- per-bar update. Call once per CLOSED bar, oldest first. ----
   push(bar) {
     const cfg = this.cfg;
@@ -702,6 +766,7 @@ class DaleCore {
       prevProf: this._prevRows || null, htfRows: this._htfRows || null,
       absorb: false, absorbZones: null, nakedPocs: null,
       sessionLabel: sessionWindowLabel(cfg),
+      activity: null, fnRules: fnRulesFor(cfg.accountSize),
       // per-session profiles for the MarketProfile-style display (each
       // session's histogram drawn at its own start, like the MT5 chart)
       sessionProfiles: this.sessions.slice(-6)
@@ -930,6 +995,9 @@ class DaleCore {
         if (opp) { out.flowQuit = true; this.sigLive = null; }
       }
     }
+
+    if (out.signal) this.recordTradeActivity(bar.tMs);
+    out.activity = this._activityOut(bar.tMs);
 
     return out;
   }
@@ -1366,6 +1434,10 @@ class traderMachell {
       avoidPreLon: pBool(p.avoidPreLon, true),
       preLonStartHour: Math.max(0, Math.min(23, pNum(p.preLonStart, 2))),
       preLonEndHour: Math.max(0, Math.min(23, pNum(p.preLonEnd, 3))),
+      accountSize: [25000, 50000, 100000].indexOf(Number(p.accountSize)) >= 0
+        ? Number(p.accountSize) : 100000,
+      trackActivity: pBool(p.trackActivity, true),
+      activityMaxIdleDays: Math.max(1, Math.min(30, pNum(p.activityMaxDays, 2))),
     });
   }
 
@@ -2494,6 +2566,25 @@ class traderMachell {
           : "inside value (balanced)"));
     }
     if (out.confluence) ctx.push("CONFLUENCE: ACCUM on prev POC [n=1 - untested]");
+    const fnR = out.fnRules || (out.activity && out.activity.rules);
+    if (fnR) {
+      const sz = this.core.cfg.accountSize;
+      ctx.push("FN Rapid Daily " + (sz / 1000) + "K: DLL $" + fnR.dll +
+        " | MLL $" + fnR.mll + " | buffer $" + fnR.buffer);
+    }
+    if (out.activity && this.core.cfg.trackActivity) {
+      const a = out.activity;
+      if (a.breach)
+        ctx.push("ACTIVITY BREACH: min 1 trade within " + a.maxIdle +
+          " days — place trade today (scratch OK)");
+      else if (a.urgent)
+        ctx.push("ACTIVITY: " + a.daysSince + "d since last trade — trade within " +
+          a.maxIdle + "d rule");
+      else if (a.daysSince === 0)
+        ctx.push("Activity OK (trade logged today)");
+      else
+        ctx.push("Activity: " + a.daysSince + "d since last indicator trade");
+    }
     if (this.barMin !== 1)
       ctx.push("CAUTION: " + this.barMin + "-min bars - grades measured on 1-min; * marks " +
         this.barMin + "-min-bin levels");
@@ -2514,7 +2605,7 @@ class traderMachell {
     if (offscreen) ctx.push("[old anchors offscreen - load more bars]");
     if (this._desync) ctx.push("[mirror desync]");
     if (O.calib) ctx.push("CALIB ACTIVE - each magenta line must stand on its bar");
-    ctx.push("FundedNext Rapid Daily: Asian-primary (Tradovate bid/offer flow)");
+    ctx.push("FundedNext Rapid Daily: log trades via signals (manual trades: mark in journal)");
     // delta-proxy disclosure (registry section 4: grades were measured on
     // up/down 1-min volume; live delta is the platform's bid/ask split,
     // corr 0.87 -- this caveat must stay on the banner)
@@ -2522,8 +2613,10 @@ class traderMachell {
     // effective modes, always visible: [t-du] = minute-slot emission
     // active (live axis), [du] = bar-index emission, [px] = px widths
     ctx.push(duMode ? (tMode ? "[t-du]" : "[du]") : "[px]");
+    const actBreach = out.activity && out.activity.breach;
     items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
-      out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
+      actBreach ? COLORS.sell
+        : (out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim)),
       FONT_SM));
     // prop-delivery diagnostics (field report: instrument, don't assume)
     if (O.diag) {
@@ -2748,6 +2841,9 @@ module.exports = {
     absorbZones: predef.paramSpecs.number(1, 1, 0),   // 1 = translucent bid/ask absorption bands at levels
     absorbOpacity: predef.paramSpecs.number(35, 1, 0),// absorption band opacity 0..100
     absorbMarks: predef.paramSpecs.number(0, 1, 0),   // 1 = legacy orange diamond marks
+    accountSize: predef.paramSpecs.number(100000, 1, 0), // 25000 | 50000 | 100000
+    trackActivity: predef.paramSpecs.number(1, 1, 0),  // 1 = FundedNext 2-day activity tracker
+    activityMaxDays: predef.paramSpecs.number(2, 1, 0), // min 1 trade within N activity days
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner

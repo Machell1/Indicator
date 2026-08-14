@@ -56,6 +56,10 @@ const CFG = {
   avoidPreLon: true,   // skip 1st pre-London open hour (manipulation window)
   preLonStartHour: 2,  // pre-London blackout start (NY clock)
   preLonEndHour: 3,    // pre-London blackout end (exclusive)
+  // FundedNext Rapid Daily account rules (display + activity tracking)
+  accountSize: 100000,
+  trackActivity: true,
+  activityMaxIdleDays: 2,  // min one trade within 2 FundedNext activity days
   barMinutes: 1,       // chart bar size; scales the ATR factor + session mins
   liquidMinVol: 2000,  // prior session must have traded this to be trusted
   liquidMinBars: 120,  // ...and have this many bars (harness liquidity gate)
@@ -133,6 +137,42 @@ function sessionWindowLabel(cfg) {
   if (cfg.avoidPreLon)
     label += ' (no ' + cfg.preLonStartHour + '-' + cfg.preLonEndHour + ' pre-Lon)';
   return label;
+}
+
+// FundedNext Futures Rapid Daily limits (help center / challenge terms)
+const FN_RAPID_DAILY = {
+  25000: { dll: 500, mll: 1250, buffer: 26100, profitTarget: 1500, maxPayout: 800 },
+  50000: { dll: 1000, mll: 2000, buffer: 52100, profitTarget: 3000, maxPayout: 1200 },
+  100000: { dll: 1250, mll: 2500, buffer: 102600, profitTarget: 5000, maxPayout: 2500 },
+};
+function fnRulesFor(accountSize) {
+  const sz = Number(accountSize);
+  return FN_RAPID_DAILY[sz] || FN_RAPID_DAILY[100000];
+}
+
+// FundedNext activity day rolls at 16:01 US Central (inactivity policy uses CT)
+function ctOffsetHours(tMs) {
+  const y = new Date(tMs).getUTCFullYear();
+  const dstStart = nthSundayUtcMs(y, 2, 2) + 8 * 3600e3;
+  const dstEnd = nthSundayUtcMs(y, 10, 1) + 7 * 3600e3;
+  return (tMs >= dstStart && tMs < dstEnd) ? -5 : -6;
+}
+function activityDayKey(tMs) {
+  const off = ctOffsetHours(tMs);
+  const d = new Date(tMs + off * 3600e3);
+  let dayMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const rollSec = 16 * 3600 + 61;   // 16:01:00 CT
+  const sec = d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds();
+  if (sec >= rollSec) dayMs += 86400e3;
+  const dd = new Date(dayMs);
+  const mm = String(dd.getUTCMonth() + 1).padStart(2, '0');
+  const ddN = String(dd.getUTCDate()).padStart(2, '0');
+  return `${dd.getUTCFullYear()}-${mm}-${ddN}`;
+}
+function activityDaysBetween(keyA, keyB) {
+  const a = Date.parse(keyA + 'T12:00:00Z');
+  const b = Date.parse(keyB + 'T12:00:00Z');
+  return Math.round((b - a) / 86400e3);
 }
 
 // exact floor division matching CPython's float `//` (float_divmod), so bin
@@ -262,6 +302,8 @@ class DaleCore {
     this.naked = [];          // untested session POCs (Dale's naked-POC rays)
     this.htf = null;          // composite profile {poc, vah, val}
     this.atr = 0;
+    this.lastTradeDayKey = null;   // last FundedNext activity day with a trade
+    this.activityAnchorDay = null; // chart-load anchor when no trade logged yet
     this._resetDayState();
     this.events = [];         // signal events accumulated over the run
   }
@@ -534,6 +576,27 @@ class DaleCore {
     return out.length ? out : null;
   }
 
+  recordTradeActivity(tMs) {
+    this.lastTradeDayKey = activityDayKey(tMs);
+  }
+
+  _activityOut(tMs) {
+    const cfg = this.cfg;
+    if (!cfg.trackActivity) return null;
+    const today = activityDayKey(tMs);
+    if (!this.activityAnchorDay) this.activityAnchorDay = today;
+    const ref = this.lastTradeDayKey || this.activityAnchorDay;
+    const daysSince = activityDaysBetween(ref, today);
+    const maxIdle = Math.max(1, Number(cfg.activityMaxIdleDays) || 2);
+    return {
+      daysSince, maxIdle, today,
+      lastTrade: this.lastTradeDayKey,
+      urgent: daysSince >= maxIdle - 1,
+      breach: daysSince >= maxIdle,
+      rules: fnRulesFor(cfg.accountSize),
+    };
+  }
+
   // ---- per-bar update. Call once per CLOSED bar, oldest first. ----
   push(bar) {
     const cfg = this.cfg;
@@ -555,6 +618,7 @@ class DaleCore {
       prevProf: this._prevRows || null, htfRows: this._htfRows || null,
       absorb: false, absorbZones: null, nakedPocs: null,
       sessionLabel: sessionWindowLabel(cfg),
+      activity: null, fnRules: fnRulesFor(cfg.accountSize),
       // per-session profiles for the MarketProfile-style display (each
       // session's histogram drawn at its own start, like the MT5 chart)
       sessionProfiles: this.sessions.slice(-6)
@@ -783,6 +847,9 @@ class DaleCore {
         if (opp) { out.flowQuit = true; this.sigLive = null; }
       }
     }
+
+    if (out.signal) this.recordTradeActivity(bar.tMs);
+    out.activity = this._activityOut(bar.tMs);
 
     return out;
   }

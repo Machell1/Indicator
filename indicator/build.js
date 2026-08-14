@@ -34,6 +34,7 @@ const banner = `/*
  *    little from the backtest; levels/profiles are delta-free.
  *  - Grades were measured with NO time-of-day gate; defaults trade Asian
  *    18:00-03:00 NY plus NY 09:00-11:00, skipping 02:00-03:00 pre-London.
+ *    FundedNext Rapid Daily 100K limits + 2-day activity tracker on banner.
  *  - Signals require the prior session to pass the harness liquidity gate
  *    (>= 2000 contracts, >= 120 minutes) -- thin sessions draw levels
  *    flagged [THIN] and stand down, matching how the grades were measured.
