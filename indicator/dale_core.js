@@ -48,8 +48,11 @@ const CFG = {
   accumMaxRangeATR: 1.5,
   accumBreakATR: 1.0,
   atrWindow: 420,      // 1-min bars ~ ATR(M30,14) horizon
-  nyStartHour: 9,      // signal window, New York
+  nyStartHour: 9,      // NY morning window (FundedNext overlap)
   nyEndHour: 11,
+  asianStartHour: 18,  // Asian session start, New York (Tokyo open ~19:00)
+  asianEndHour: 3,     // Asian session end (wraps midnight)
+  sessionWindow: 1,    // 0 = NY only, 1 = Asian only, 2 = both
   barMinutes: 1,       // chart bar size; scales the ATR factor + session mins
   liquidMinVol: 2000,  // prior session must have traded this to be trusted
   liquidMinBars: 120,  // ...and have this many bars (harness liquidity gate)
@@ -93,9 +96,29 @@ function sessionKey(tMs) {
   const dd = String(d.getUTCDate()).padStart(2, '0');
   return `${d.getUTCFullYear()}-${mm}-${dd}`;
 }
-function inNyWindow(tMs, cfg) {
+function inHourWindow(tMs, start, end) {
   const h = nyParts(tMs).hour;
-  return h >= cfg.nyStartHour && h < cfg.nyEndHour;
+  if (start < end) return h >= start && h < end;
+  return h >= start || h < end;   // wraps midnight (Asian 18:00-03:00)
+}
+function inNyWindow(tMs, cfg) {
+  return inHourWindow(tMs, cfg.nyStartHour, cfg.nyEndHour);
+}
+function inAsianWindow(tMs, cfg) {
+  return inHourWindow(tMs, cfg.asianStartHour, cfg.asianEndHour);
+}
+function inTradeWindow(tMs, cfg) {
+  const mode = Number(cfg.sessionWindow);
+  if (mode === 0) return inNyWindow(tMs, cfg);
+  if (mode === 2) return inNyWindow(tMs, cfg) || inAsianWindow(tMs, cfg);
+  return inAsianWindow(tMs, cfg);   // default: Asian (FundedNext Rapid Daily)
+}
+function sessionWindowLabel(cfg) {
+  const mode = Number(cfg.sessionWindow);
+  if (mode === 0) return 'NY ' + cfg.nyStartHour + ':00-' + cfg.nyEndHour + ':00';
+  if (mode === 2) return 'Asian+' + cfg.asianStartHour + '-' + cfg.asianEndHour +
+    ' & NY ' + cfg.nyStartHour + '-' + cfg.nyEndHour;
+  return 'Asian ' + cfg.asianStartHour + ':00-' + cfg.asianEndHour + ':00 NY';
 }
 
 // exact floor division matching CPython's float `//` (float_divmod), so bin
@@ -242,6 +265,7 @@ class DaleCore {
     this.leg = { level: null, prof: null, down: false, key: null,
       wasOut: false, maxd: 0, done: false, firedToday: false };
     this.sigLive = null;      // open signal being tracked for flow-quit
+    this.absorbZones = {};    // priceKey -> { price, bidVol, offerVol, firstTms, lastTms, tag }
   }
 
   // ---- session roll ----
@@ -434,6 +458,68 @@ class DaleCore {
     return Math.abs(this.dayBars[n - 1].c - this.dayBars[n - 6].c) > 0.8 * atr;
   }
 
+  // Order-flow absorption ledger at key levels (Tradovate bid/offer split).
+  // Bid absorption (green): sellers hit bids, price holds. Offer absorption
+  // (red): buyers hit offers, price stalls. No L2 book — inferred from
+  // bar delta + hold-at-level, same playbook semantics.
+  _absorbKey(price, atr) {
+    const step = Math.max(atr * 0.05, 0.1);
+    return Math.round(price / step);
+  }
+
+  _trackLevelAbsorption(bar, atr) {
+    const cfg = this.cfg;
+    const n = this.dayBars.length;
+    if (n < 5 || atr <= 0) return;
+    const w = this.dayBars.slice(-cfg.sigStatWindow);
+    const vmed = median(w.map(b => b.vol));
+    const rmed = median(w.map(b => b.h - b.l));
+    if (vmed <= 0 || rmed <= 0) return;
+    const bidVol = bar.bidVol != null ? bar.bidVol
+      : Math.max(0, (bar.vol - bar.delta) / 2);
+    const offerVol = bar.offerVol != null ? bar.offerVol
+      : Math.max(0, (bar.vol + bar.delta) / 2);
+    const zone = 0.30 * atr;
+    const churn = bar.vol >= 1.2 * vmed && (bar.h - bar.l) <= 1.0 * rmed;
+
+    const levels = [];
+    if (this.prev) levels.push({ price: this.prev.poc, tag: 'POC' });
+    if (this.acc.level !== null) levels.push({ price: this.acc.level, tag: 'ACCUM' });
+    if (this.htf) levels.push({ price: this.htf.poc, tag: 'HTF' });
+
+    for (const lvl of levels) {
+      if (bar.l > lvl.price + zone || bar.h < lvl.price - zone) continue;
+      const holds = lvl.price >= bar.l - zone && lvl.price <= bar.h + zone;
+      if (!holds) continue;
+
+      const bidAbs = churn && bidVol >= offerVol * 1.05 &&
+        bar.l >= lvl.price - zone;
+      const offerAbs = churn && offerVol >= bidVol * 1.05 &&
+        bar.h <= lvl.price + zone;
+
+      if (!bidAbs && !offerAbs) continue;
+      const key = this._absorbKey(lvl.price, atr);
+      let z = this.absorbZones[key];
+      if (!z) {
+        z = { price: lvl.price, bidVol: 0, offerVol: 0,
+          firstTms: bar.tMs, lastTms: bar.tMs, tag: lvl.tag };
+        this.absorbZones[key] = z;
+      }
+      if (bidAbs) z.bidVol += bidVol;
+      if (offerAbs) z.offerVol += offerVol;
+      z.lastTms = bar.tMs;
+      if (!z.tag && lvl.tag) z.tag = lvl.tag;
+    }
+  }
+
+  _absorbZonesOut(vmed) {
+    const zones = Object.values(this.absorbZones);
+    if (!zones.length) return null;
+    const minVol = vmed > 0 ? vmed * 0.5 : 0;
+    const out = zones.filter(z => z.bidVol + z.offerVol >= minVol);
+    return out.length ? out : null;
+  }
+
   // ---- per-bar update. Call once per CLOSED bar, oldest first. ----
   push(bar) {
     const cfg = this.cfg;
@@ -453,7 +539,8 @@ class DaleCore {
       htf: this.htf, accum: null, leg: null, signal: null, flowQuit: false,
       confluence: false, status: '',
       prevProf: this._prevRows || null, htfRows: this._htfRows || null,
-      absorb: false, nakedPocs: null,
+      absorb: false, absorbZones: null, nakedPocs: null,
+      sessionLabel: sessionWindowLabel(cfg),
       // per-session profiles for the MarketProfile-style display (each
       // session's histogram drawn at its own start, like the MT5 chart)
       sessionProfiles: this.sessions.slice(-6)
@@ -488,8 +575,13 @@ class DaleCore {
     }
 
     const px = bar.c;
-    const inWin = inNyWindow(bar.tMs, cfg);
+    const inWin = inTradeWindow(bar.tMs, cfg);
     const i = this.dayBars.length - 1;
+    const sigW = this.dayBars.slice(-cfg.sigStatWindow);
+    const vmedSig = median(sigW.map(b => b.vol));
+
+    this._trackLevelAbsorption(bar, atr);
+    out.absorbZones = this._absorbZonesOut(vmedSig);
 
     // ------- prior-POC machine: touch -> signature -> fire -------
     // gated on prior-session liquidity, matching how the grade was measured
@@ -653,7 +745,8 @@ class DaleCore {
     else if (P.touchedAt >= 0) out.status = 'TOUCHED - waiting for absorption-initiative';
     else if (P.armed && inWin)
       out.status = P.side ? 'armed: buy the retest from above' : 'armed: sell the retest from below';
-    else if (P.armed) out.status = 'armed - outside the 09:00-11:00 NY window';
+    else if (P.armed) out.status = 'armed - outside trade window (' +
+      sessionWindowLabel(cfg) + ' NY)';
     else out.status = 'waiting: price has not moved 1 ATR from the level';
 
     // ------- flow-quit alert on the open prior-POC signal -------
