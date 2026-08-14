@@ -1,7 +1,7 @@
 /*
  * TraderMachell -- Tradovate custom indicator
  * Dale volume-profile model with backtest-earned evidence tags.
- * Generated 2026-08-11 by build.js -- do not edit by hand;
+ * Generated 2026-08-14 by build.js -- do not edit by hand;
  * edit dale_core.js / wrapper.js and rebuild.
  *
  * Core math is regression-verified: identical POC/VAH/VAL to the Python
@@ -14,8 +14,9 @@
  *    The grades were measured on upVolume - downVolume: corr 0.87, exact
  *    match on 24% of bars. Signature + flow-quit timing may differ a
  *    little from the backtest; levels/profiles are delta-free.
- *  - Grades were measured with NO time-of-day gate; this indicator (like
- *    the MT5 version and the playbook) only signals 09:00-11:00 NY.
+ *  - Grades were measured with NO time-of-day gate. The deployed session
+ *    window is configurable and defaults to 18:00-02:00 New York for the
+ *    requested Asian-session workflow; events in this window are ungraded.
  *  - Signals require the prior session to pass the harness liquidity gate
  *    (>= 2000 contracts, >= 120 minutes) -- thin sessions draw levels
  *    flagged [THIN] and stand down, matching how the grades were measured.
@@ -27,6 +28,11 @@
  *    absorption undetectable in NY hours. Same concept, local calibration.
  *  - No alerts: Tradovate custom indicators cannot fire alerts. This tool
  *    draws; the playbook's alert-driven routine stays on MT5.
+ *  - Price-level absorption uses d.profile() executed bid/ask volume. It
+ *    cannot see resting DOM liquidity, cancellations, queue position, or
+ *    icebergs; red/green zones are footprint candidates, not proof.
+ *  - Funded-account sizing is advisory and uses user-entered limits. The
+ *    indicator cannot read account equity, fills, P&L, or broker rules.
  *
  * INSTALL: Tradovate -> Charts module -> Indicators -> Indicator Editor
  * (Code Explorer) -> New Indicator -> replace the template with this whole
@@ -197,6 +203,9 @@ const CFG = {
   atrWindow: 420,      // 1-min bars ~ ATR(M30,14) horizon
   nyStartHour: 9,      // signal window, New York
   nyEndHour: 11,
+  signalStartMinute: null, // optional minute-of-day override; supports midnight wrap
+  signalEndMinute: null,
+  signalWindowLabel: 'NY 09:00-11:00',
   barMinutes: 1,       // chart bar size; scales the ATR factor + session mins
   liquidMinVol: 2000,  // prior session must have traded this to be trusted
   liquidMinBars: 120,  // ...and have this many bars (harness liquidity gate)
@@ -227,7 +236,9 @@ function nyParts(tMs) {
   const d = new Date(tMs + off * 3600e3);
   return {
     y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate(),
-    hour: d.getUTCHours(), dayMs: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+    hour: d.getUTCHours(), minute: d.getUTCMinutes(),
+    minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+    dayMs: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
   };
 }
 // CME session day: rolls at 17:00 New York. Returns "YYYY-MM-DD".
@@ -241,8 +252,16 @@ function sessionKey(tMs) {
   return `${d.getUTCFullYear()}-${mm}-${dd}`;
 }
 function inNyWindow(tMs, cfg) {
-  const h = nyParts(tMs).hour;
-  return h >= cfg.nyStartHour && h < cfg.nyEndHour;
+  const p = nyParts(tMs);
+  const configured = Number.isFinite(cfg.signalStartMinute) &&
+    Number.isFinite(cfg.signalEndMinute);
+  if (!configured) return p.hour >= cfg.nyStartHour && p.hour < cfg.nyEndHour;
+  const start = Math.max(0, Math.min(1439, cfg.signalStartMinute));
+  const end = Math.max(0, Math.min(1439, cfg.signalEndMinute));
+  if (start === end) return true; // explicit 24-hour window
+  return start < end
+    ? p.minuteOfDay >= start && p.minuteOfDay < end
+    : p.minuteOfDay >= start || p.minuteOfDay < end;
 }
 
 // exact floor division matching CPython's float `//` (float_divmod), so bin
@@ -636,6 +655,10 @@ class DaleCore {
 
     const px = bar.c;
     const inWin = inNyWindow(bar.tMs, cfg);
+    out.signalWindow = {
+      label: cfg.signalWindowLabel || 'configured window',
+      active: inWin,
+    };
     const i = this.dayBars.length - 1;
 
     // ------- prior-POC machine: touch -> signature -> fire -------
@@ -800,7 +823,8 @@ class DaleCore {
     else if (P.touchedAt >= 0) out.status = 'TOUCHED - waiting for absorption-initiative';
     else if (P.armed && inWin)
       out.status = P.side ? 'armed: buy the retest from above' : 'armed: sell the retest from below';
-    else if (P.armed) out.status = 'armed - outside the 09:00-11:00 NY window';
+    else if (P.armed) out.status = 'armed - outside ' +
+      (cfg.signalWindowLabel || 'the configured signal window');
     else out.status = 'waiting: price has not moved 1 ATR from the level';
 
     // ------- flow-quit alert on the open prior-POC signal -------
@@ -822,6 +846,119 @@ class DaleCore {
 
     return out;
   }
+}
+
+
+/*
+ * orderflow.js -- pure footprint/executed-flow absorption sidecar.
+ *
+ * Tradovate's d.profile() rows describe EXECUTED volume at price. They do
+ * not expose resting DOM size, cancellations, queue position, or icebergs.
+ * Events produced here are therefore absorption candidates, not proof of
+ * passive liquidity.
+ */
+
+
+const FLOW_DEFAULTS = {
+  minVolume: 20,
+  relativeVolume: 1.5,
+  imbalanceRatio: 2.0,
+  edgeFraction: 0.35,
+  maxLevelsPerBar: 3,
+};
+
+function finite(v) {
+  const n = Number(typeof v === 'function' ? v() : v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function field(row, names) {
+  for (const name of names) {
+    if (row && row[name] !== undefined) {
+      const v = finite(row[name]);
+      if (v !== null) return v;
+    }
+  }
+  return null;
+}
+
+function normalizeProfile(raw) {
+  if (!Array.isArray(raw)) return [];
+  const rows = [];
+  for (const r of raw) {
+    const price = field(r, ['price']);
+    const bid = field(r, ['bidVol', 'bidVolume', 'bid']);
+    const ask = field(r, ['askVol', 'offerVol', 'offerVolume', 'ask']);
+    let vol = field(r, ['vol', 'volume']);
+    if (price === null || bid === null || ask === null || bid < 0 || ask < 0) continue;
+    if (vol === null) vol = bid + ask;
+    if (!(vol > 0)) continue;
+    rows.push({ price, bid, ask, vol: Math.max(vol, bid + ask) });
+  }
+  rows.sort((a, b) => a.price - b.price);
+  return rows;
+}
+
+function median(values) {
+  if (!values.length) return 0;
+  const a = values.slice().sort((x, y) => x - y);
+  const m = a.length >> 1;
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+function detectFootprintAbsorption(raw, bar, options) {
+  const cfg = Object.assign({}, FLOW_DEFAULTS, options || {});
+  const rows = normalizeProfile(raw);
+  if (rows.length < 2 || !bar || !(bar.h >= bar.l)) return [];
+  const med = median(rows.map(r => r.vol));
+  const range = Math.max(bar.h - bar.l, 1e-9);
+  const threshold = Math.max(0, cfg.minVolume, med * Math.max(1, cfg.relativeVolume));
+  const edge = Math.max(0.05, Math.min(0.5, cfg.edgeFraction));
+  const ratioFloor = Math.max(1.01, cfg.imbalanceRatio);
+  const hits = [];
+
+  for (const r of rows) {
+    if (r.vol < threshold) continue;
+    const pos = (r.price - bar.l) / range;
+    const sellRatio = r.bid / Math.max(1, r.ask);
+    const buyRatio = r.ask / Math.max(1, r.bid);
+    let long = null;
+    let aggressorVolume = 0;
+    let ratio = 0;
+    let aggressor = '';
+    if (pos <= edge && sellRatio >= ratioFloor) {
+      // Sellers hit the bid at the lower edge but price held: bullish
+      // demand/absorption candidate.
+      long = true;
+      aggressorVolume = r.bid;
+      ratio = sellRatio;
+      aggressor = 'BID';
+    } else if (pos >= 1 - edge && buyRatio >= ratioFloor) {
+      // Buyers lifted the offer at the upper edge but price held: bearish
+      // supply/absorption candidate.
+      long = false;
+      aggressorVolume = r.ask;
+      ratio = buyRatio;
+      aggressor = 'ASK';
+    }
+    if (long === null) continue;
+    const volumeScore = Math.min(1, r.vol / Math.max(threshold * 3, 1));
+    const imbalanceScore = Math.min(1, (ratio - ratioFloor) / ratioFloor + 0.35);
+    hits.push({
+      price: r.price,
+      long,
+      aggressor,
+      amount: Math.round(aggressorVolume),
+      totalVolume: Math.round(r.vol),
+      ratio,
+      strength: Math.max(0.2, Math.min(1, 0.55 * volumeScore + 0.45 * imbalanceScore)),
+      source: 'price-level executed bid/ask',
+    });
+  }
+
+  hits.sort((a, b) =>
+    (b.amount * b.ratio) - (a.amount * a.ratio));
+  return hits.slice(0, Math.max(1, Math.round(cfg.maxLevelsPerBar)));
 }
 
 
@@ -931,6 +1068,34 @@ function pBool(v, dflt) {
 function pNum(v, dflt) {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+function pRange(v, dflt, lo, hi) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : dflt;
+}
+function hhmmMinute(v, dflt) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return dflt;
+  const h = Math.floor(n / 100), m = n % 100;
+  return h >= 0 && h <= 23 && m >= 0 && m <= 59 ? h * 60 + m : dflt;
+}
+function sessionCfg(props) {
+  const p = props || {};
+  const preset = Math.round(pRange(p.sessionPreset, 1, 0, 4));
+  if (preset === 0)
+    return { start: 9 * 60, end: 11 * 60, label: "NY 09:00-11:00" };
+  if (preset === 2)
+    return { start: 2 * 60, end: 8 * 60, label: "LONDON 02:00-08:00 NY" };
+  if (preset === 3)
+    return { start: 0, end: 0, label: "ALL SESSION" };
+  if (preset === 4) {
+    const start = hhmmMinute(p.sessionStart, 18 * 60);
+    const end = hhmmMinute(p.sessionEnd, 2 * 60);
+    const fmtM = m => String(Math.floor(m / 60)).padStart(2, "0") + ":" +
+      String(m % 60).padStart(2, "0");
+    return { start, end, label: "CUSTOM " + fmtM(start) + "-" + fmtM(end) + " NY" };
+  }
+  return { start: 18 * 60, end: 2 * 60, label: "ASIA 18:00-02:00 NY" };
 }
 
 // ---- du emission transform (field report section 10) ---------------------
@@ -1108,6 +1273,7 @@ class traderMachell {
     this._obsDeltas = [];         // inter-bar spacing samples since reset
     this._obsFor = 0;             // last bar timestamp sampled
     const s = (mins, floor) => Math.max(floor || 5, Math.round(mins / barMin));
+    const ses = sessionCfg(this.props);
     this.core = new DaleCore({
       barMinutes: barMin,
       atrWindow: s(420, 30),
@@ -1120,6 +1286,9 @@ class traderMachell {
       // core builds no HTF composite below 5 sessions (dale_core "< 5"
       // gate) -- clamp so a dialog value of 1-4 can't silently starve it
       htfSessions: Math.max(5, Math.round(pNum(this.props && this.props.htfSessions, 20))),
+      signalStartMinute: ses.start,
+      signalEndMinute: ses.end,
+      signalWindowLabel: ses.label,
     });
     // du-mode row caps, rescaled so a row's bar-width tracks real time when
     // the zoom buttons switch aggregation (Q1 resets the indicator anyway)
@@ -1132,6 +1301,9 @@ class traderMachell {
     this.lastPushedMs = 0;
     this.lastOut = null;
     this.marks = [];              // {tMs, price, day, ev} -- anchors are
+    this.flowAbsorptions = [];    // bounded d.profile() footprint candidates
+    this.flowProfileSeen = false;
+    this.signalLedger = { day: null, count: 0 };
     // resolved from timestamps at draw time, never from stale indexes
     this.tmsList = [];            // pushed-bar timestamps, in order
     this.idxList = [];            // each bar's chart index AT PUSH TIME,
@@ -1262,6 +1434,17 @@ class traderMachell {
       // (minute-slots only while the chart is live: last pushed bar fresh)
       duTime: [0, 1, 2].indexOf(Number(p.duTime)) >= 0 ? Number(p.duTime) : 2,
       originShift: Number.isFinite(Number(p.originShift)) ? Number(p.originShift) : 0,
+      flow: pBool(p.orderFlow, true),
+      flowOpacity: pRange(p.absOpacity, 26, 0, 100),
+      flowMinVol: pRange(p.absMinVol, 20, 0, 100000),
+      flowRelVol: pRange(p.absRelativeVol, 1.5, 1, 20),
+      flowRatio: pRange(p.absImbalance, 2, 1.01, 20),
+      flowLabels: Math.round(pRange(p.absMaxLabels, 8, 0, 20)),
+      riskHud: pBool(p.riskHud, true),
+      riskBudget: pRange(p.riskBudgetUsd, 200, 0, 100000),
+      pointValue: pRange(p.pointValue, 10, 0.01, 100000),
+      maxContracts: Math.round(pRange(p.maxContracts, 2, 1, 100)),
+      maxSignals: Math.round(pRange(p.maxSignalsPerSession, 2, 1, 100)),
     };
   }
 
@@ -1446,11 +1629,48 @@ class traderMachell {
     }
     const out = this.core.push(bar);
     this.lastOut = out;
-    if (out.absorb)
-      this.marks.push({ tMs, price: bar.c, day: out.day,
-        ev: { kind: "absorb", long: this.core.poc.side } });
-    if (out.signal)
+    if (this.signalLedger.day !== out.day)
+      this.signalLedger = { day: out.day, count: 0 };
+    const O = this._opts();
+    // d.profile() is Tradovate's executed volume-at-price footprint. Keep it
+    // display-only: it never mutates DaleCore or inherits the legacy grades.
+    if (O.flow && typeof e.profile === "function") {
+      try {
+        const raw = e.profile();
+        if (Array.isArray(raw) && raw.length) {
+          this.flowProfileSeen = true;
+          const hits = detectFootprintAbsorption(raw, bar, {
+            minVolume: O.flowMinVol,
+            relativeVolume: O.flowRelVol,
+            imbalanceRatio: O.flowRatio,
+            maxLevelsPerBar: 3,
+          });
+          for (const hit of hits)
+            this.flowAbsorptions.push(Object.assign({ tMs, day: out.day }, hit));
+          if (this.flowAbsorptions.length > 80)
+            this.flowAbsorptions.splice(0, this.flowAbsorptions.length - 80);
+        }
+      } catch (err) { /* profile unavailable/malformed: bar fallback remains */ }
+    }
+    if (out.absorb) {
+      const long = !!this.core.poc.side;
+      this.marks.push({ tMs, price: long ? bar.l : bar.h, day: out.day,
+        ev: { kind: "absorb", long, amount: Math.round(bar.vol),
+          source: "bar volume/range fallback" } });
+    }
+    if (out.signal) {
+      this.signalLedger.count++;
+      const points = Math.abs(out.signal.entry - out.signal.sl);
+      const perContract = points * O.pointValue;
+      const qty = perContract > 0
+        ? Math.min(O.maxContracts, Math.floor(O.riskBudget / perContract)) : 0;
+      out.signal.risk = {
+        points, perContract, qty,
+        plannedUsd: qty * perContract,
+        withinSignalBudget: this.signalLedger.count <= O.maxSignals,
+      };
       this.marks.push({ tMs, price: out.signal.entry, day: out.day, ev: out.signal });
+    }
     if (out.flowQuit)
       this.marks.push({ tMs, price: bar.c, day: out.day, ev: { kind: "flowquit" } });
     if (this.marks.length > 60) this.marks.shift();
@@ -1661,6 +1881,7 @@ class traderMachell {
     // 3=HTF mirror); the list is priority-sorted before the frame ends so
     // the plotter's shared stroke budget degrades least-important last.
     this._plotProfiles = [];
+    this._plotAbsorbs = [];
     const rowsToPlotter = O.rowsPlot && duMode;
     const futureKeys = new Set();   // filled by guards below + the final scan
     const idx = (t, layer) => {
@@ -2074,7 +2295,8 @@ class traderMachell {
       if (ev.kind === "absorb") {
         if (!today) continue;
         items.push(txt("ab" + mk.tMs, mi, mk.price,
-          "\u25C6", COLORS.absorb, ev.long ? 12 : -12, FONT_SM, "centerMiddle"));
+          "\u25C6", ev.long ? COLORS.buy : COLORS.sell,
+          ev.long ? 12 : -12, FONT_SM, "centerMiddle"));
         lastAbsorb = mk; lastAbsorbIdx = mi;
         continue;
       }
@@ -2103,9 +2325,45 @@ class traderMachell {
     // the rest without stamping text over every churn bar)
     if (lastAbsorb && lastAbsorbIdx !== undefined) {
       items.push(txt("abT", lastAbsorbIdx, lastAbsorb.price,
-        "ABSORPTION", COLORS.absorb, lastAbsorb.ev.long ? 26 : -26,
+        "CHURN/DEFENSE ~" + (lastAbsorb.ev.amount || "?"),
+        lastAbsorb.ev.long ? COLORS.buy : COLORS.sell,
+        lastAbsorb.ev.long ? 26 : -26,
         FONT_SM, "centerMiddle"));
     }
+    // ---- footprint absorption candidates (d.profile executed bid/ask) ----
+    // Translucent zones ride the canvas plotter; numeric labels remain Text
+    // because Canvas exposes no text primitive. "~" is intentional: the
+    // value is aggressive volume executed at the row, not observable DOM
+    // replenishment or a proven passive-order quantity.
+    if (O.flow && this.flowAbsorptions.length) {
+      const visible = [];
+      const tick = (this.contractInfo && this.contractInfo.tickSize) || 0.1;
+      for (const fa of this.flowAbsorptions) {
+        if (fa.day !== out.day) continue;
+        const ai = idx(fa.tMs, "flowAbs");
+        if (ai === undefined) continue;
+        const h = Math.max(tick, Math.min((out.atr || tick) * 0.16,
+          tick * (1 + 5 * fa.strength)));
+        const w = Math.max(2, Math.round(2 + 6 * fa.strength));
+        const key = fa.tMs + "_" + Math.round(fa.price / tick);
+        const payload = {
+          key, idx: ai, price: fa.price, h, w,
+          color: fa.long ? COLORS.buy : COLORS.sell,
+          opacity: O.flowOpacity / 100,
+        };
+        this._plotAbsorbs.push(payload);
+        visible.push({ fa, ai, key });
+      }
+      visible.sort((a, b) => b.fa.amount - a.fa.amount);
+      for (const v of visible.slice(0, O.flowLabels)) {
+        const fa = v.fa;
+        items.push(txt("faT" + v.key, v.ai, fa.price,
+          fa.aggressor + " ABS ~" + fa.amount + "  " + fa.ratio.toFixed(1) + "x",
+          fa.long ? COLORS.buy : COLORS.sell,
+          fa.long ? 18 : -18, FONT_XS, "centerMiddle"));
+      }
+    }
+    if (!this._plotAbsorbs.length) this._plotAbsorbs = null;
     if (lastSig && lastSigIdx !== undefined) {
       const ev = lastSig.ev;
       items.push(ray("tpL", lastSigIdx, ev.tp, COLORS.tp, 2, 3));
@@ -2188,7 +2446,7 @@ class traderMachell {
           ? slotRect(DU_T(x0), Math.max(10, Math.round((i - x0) / 3)), pLo, pHi)
           : pxrect(x0, 80, pLo, pHi)],
         fillStyle: { color: COLORS.test } });
-      items.push(frameTxt("alnT", 70, O.diag ? 90 : 72,
+      items.push(frameTxt("alnT", 70, O.diag ? 126 : 108,
         "ALIGN TEST: white POC ray must bisect the magenta row. Row ABOVE ray => set RECT_Y_ANCHOR='top'",
         COLORS.test, FONT_SM));
     }
@@ -2355,6 +2613,33 @@ class traderMachell {
     items.push(frameTxt("stat3", 70, 54, ctx.join("   |   "),
       out.confluence ? COLORS.conflu : (this.barMin !== 1 ? COLORS.warn : COLORS.dim),
       FONT_SM));
+    const sw = out.signalWindow || {
+      label: this.core.cfg.signalWindowLabel,
+      active: inNyWindow(out.tMs, this.core.cfg),
+    };
+    items.push(frameTxt("flowHud", 70, 72,
+      "WINDOW " + sw.label + "  " + (sw.active ? "ACTIVE" : "CLOSED") +
+      "   |   ORDER FLOW " +
+      (this.flowProfileSeen ? "price-level bid/ask" : "bar fallback - waiting for d.profile()") +
+      "   |   zones are executed-flow candidates, not resting DOM",
+      sw.active ? COLORS.status : COLORS.dim, FONT_SM));
+    if (O.riskHud) {
+      let riskText = "RAPID ADVISORY  |  planned risk $" + O.riskBudget.toFixed(0) +
+        "  |  point value $" + O.pointValue.toFixed(2) + "/pt" +
+        "  |  max contracts " + O.maxContracts +
+        "  |  signals " + this.signalLedger.count + "/" + O.maxSignals +
+        "  |  manual inputs - no account/P&L access";
+      if (lastSig && lastSig.ev.risk) {
+        const R = lastSig.ev.risk;
+        riskText += "  |  LAST: " + R.qty + " contract(s), $" +
+          R.plannedUsd.toFixed(0) + " planned";
+        if (!R.withinSignalBudget) riskText += " [SESSION BUDGET EXCEEDED]";
+        if (R.qty < 1) riskText += " [STOP TOO WIDE]";
+      }
+      items.push(frameTxt("riskHud", 70, 90, riskText,
+        (lastSig && lastSig.ev.risk && (!lastSig.ev.risk.withinSignalBudget ||
+          lastSig.ev.risk.qty < 1)) ? COLORS.warn : COLORS.dim, FONT_SM));
+    }
     // prop-delivery diagnostics (field report: instrument, don't assume)
     if (O.diag) {
       const p = this.props || {};
@@ -2384,7 +2669,7 @@ class traderMachell {
       // tf= settles elementSize semantics per timeframe in one screenshot
       // (TIMEFRAME_ANCHORING_SPEC.md section 1.2)
       const cd4 = this.chartDescription;
-      items.push(frameTxt("stat4", 70, 72,
+      items.push(frameTxt("stat4", 70, 108,
         "tf=" + (cd4 ? cd4.underlyingType + "/" + cd4.elementSize : "none") +
         " barMin=" + this.barMin +
         " bidx=" + (typeof d.index === "function" ? d.index() : "-") +
@@ -2498,6 +2783,31 @@ function vaFillPlotter(canvas, instance, history) {
         }
       }
     }
+    // ---- price-level executed-flow absorption zones ---------------------
+    // Independent 400-stroke budget so this layer cannot starve profiles.
+    // Drawn last so the red/green candidate remains legible above profile
+    // shading. d.profile() does not expose resting DOM or cancellations.
+    const absorbs = instance._plotAbsorbs;
+    if (absorbs && absorbs.length && pBool(props.orderFlow, true)) {
+      let budget = 400;
+      const n = history.data.length;
+      for (const A of absorbs) {
+        if (budget <= 0) break;
+        const jFrom = Math.max(0, A.idx);
+        const jTo = Math.min(n - 2, A.idx + A.w - 1);
+        for (let j = jFrom; j <= jTo && budget > 0; j++) {
+          const item = history.get(j);
+          if (!item) continue;
+          const x = plt.x.get(item);
+          canvas.drawLine(
+            plt.offset(x, A.price - A.h * 0.5),
+            plt.offset(x, A.price + A.h * 0.5),
+            { color: A.color, relativeWidth: 1,
+              opacity: Math.max(0.01, Math.min(1, A.opacity)) });
+          budget--;
+        }
+      }
+    }
   } catch (e) { /* optional layer: swallow, never break the chart */ }
 }
 
@@ -2510,6 +2820,7 @@ module.exports = {
   description: "TraderMachell - Dale volume-profile model (tested grades)",
   calculator: traderMachell,
   inputType: meta.InputType.BARS,
+  requirements: { volumeProfiles: true },
   areaChoice: meta.AreaChoice.OVERLAY,
   tags: ["TraderMachell"],
   params: {
@@ -2536,6 +2847,20 @@ module.exports = {
     calib: predef.paramSpecs.number(0, 1, 0),         // 1 = du-axis calibration probe (one screenshot maps du->pixel)
     duTime: predef.paramSpecs.number(2, 1, 0),        // du emission: 0 = bar-index, 1 = minute-slots, 2 = auto (live only)
     originShift: predef.paramSpecs.number(0, 1),      // minutes added to the layout origin (live calibration)
+    sessionPreset: predef.paramSpecs.number(1, 1, 0), // 0 NY, 1 Asia 18-02 NY, 2 London, 3 all, 4 custom
+    sessionStart: predef.paramSpecs.number(1800, 100, 0), // custom HHMM
+    sessionEnd: predef.paramSpecs.number(200, 100, 0),   // custom HHMM
+    orderFlow: predef.paramSpecs.number(1, 1, 0),     // d.profile executed bid/ask candidates
+    absOpacity: predef.paramSpecs.number(26, 1, 0),   // translucent zone opacity
+    absMinVol: predef.paramSpecs.number(20, 1, 0),    // minimum executed row volume
+    absRelativeVol: predef.paramSpecs.number(1.5, 0.1, 1), // vs bar-profile median row
+    absImbalance: predef.paramSpecs.number(2, 0.1, 1), // dominant/opposing aggressor ratio
+    absMaxLabels: predef.paramSpecs.number(8, 1, 0),  // labels; zones remain capped separately
+    riskHud: predef.paramSpecs.number(1, 1, 0),       // advisory sizing card
+    riskBudgetUsd: predef.paramSpecs.number(200, 25, 0),
+    pointValue: predef.paramSpecs.number(10, 1, 0),   // MGC default; set explicitly for other products
+    maxContracts: predef.paramSpecs.number(2, 1, 1),
+    maxSignalsPerSession: predef.paramSpecs.number(2, 1, 1),
   },
 };
 

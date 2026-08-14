@@ -50,6 +50,9 @@ const CFG = {
   atrWindow: 420,      // 1-min bars ~ ATR(M30,14) horizon
   nyStartHour: 9,      // signal window, New York
   nyEndHour: 11,
+  signalStartMinute: null, // optional minute-of-day override; supports midnight wrap
+  signalEndMinute: null,
+  signalWindowLabel: 'NY 09:00-11:00',
   barMinutes: 1,       // chart bar size; scales the ATR factor + session mins
   liquidMinVol: 2000,  // prior session must have traded this to be trusted
   liquidMinBars: 120,  // ...and have this many bars (harness liquidity gate)
@@ -80,7 +83,9 @@ function nyParts(tMs) {
   const d = new Date(tMs + off * 3600e3);
   return {
     y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate(),
-    hour: d.getUTCHours(), dayMs: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+    hour: d.getUTCHours(), minute: d.getUTCMinutes(),
+    minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+    dayMs: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
   };
 }
 // CME session day: rolls at 17:00 New York. Returns "YYYY-MM-DD".
@@ -94,8 +99,16 @@ function sessionKey(tMs) {
   return `${d.getUTCFullYear()}-${mm}-${dd}`;
 }
 function inNyWindow(tMs, cfg) {
-  const h = nyParts(tMs).hour;
-  return h >= cfg.nyStartHour && h < cfg.nyEndHour;
+  const p = nyParts(tMs);
+  const configured = Number.isFinite(cfg.signalStartMinute) &&
+    Number.isFinite(cfg.signalEndMinute);
+  if (!configured) return p.hour >= cfg.nyStartHour && p.hour < cfg.nyEndHour;
+  const start = Math.max(0, Math.min(1439, cfg.signalStartMinute));
+  const end = Math.max(0, Math.min(1439, cfg.signalEndMinute));
+  if (start === end) return true; // explicit 24-hour window
+  return start < end
+    ? p.minuteOfDay >= start && p.minuteOfDay < end
+    : p.minuteOfDay >= start || p.minuteOfDay < end;
 }
 
 // exact floor division matching CPython's float `//` (float_divmod), so bin
@@ -489,6 +502,10 @@ class DaleCore {
 
     const px = bar.c;
     const inWin = inNyWindow(bar.tMs, cfg);
+    out.signalWindow = {
+      label: cfg.signalWindowLabel || 'configured window',
+      active: inWin,
+    };
     const i = this.dayBars.length - 1;
 
     // ------- prior-POC machine: touch -> signature -> fire -------
@@ -653,7 +670,8 @@ class DaleCore {
     else if (P.touchedAt >= 0) out.status = 'TOUCHED - waiting for absorption-initiative';
     else if (P.armed && inWin)
       out.status = P.side ? 'armed: buy the retest from above' : 'armed: sell the retest from below';
-    else if (P.armed) out.status = 'armed - outside the 09:00-11:00 NY window';
+    else if (P.armed) out.status = 'armed - outside ' +
+      (cfg.signalWindowLabel || 'the configured signal window');
     else out.status = 'waiting: price has not moved 1 ATR from the level';
 
     // ------- flow-quit alert on the open prior-POC signal -------
@@ -679,5 +697,8 @@ class DaleCore {
 
 // Node + Tradovate-module compatibility
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { DaleCore, buildProfile, stopBehindLVN, sessionKey, nyOffsetHours, CFG };
+  module.exports = {
+    DaleCore, buildProfile, stopBehindLVN, sessionKey, nyOffsetHours,
+    inNyWindow, nyParts, CFG,
+  };
 }

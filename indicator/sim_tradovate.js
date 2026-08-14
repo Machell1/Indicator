@@ -54,7 +54,12 @@ const bars = loadCsv(path.join(__dirname, '..', 'data_tv', 'TV_GCQ6_1min.csv'));
 // which is what the deployed indicator will see. The backtest used
 // upVolume - downVolume; on this dataset the two correlate 0.87 and match
 // exactly on only 24% of bars -- a documented caveat, not a code issue.
-const ref = new DaleCore({ htfSessions: 20 });
+const ref = new DaleCore({
+  htfSessions: 20,
+  signalStartMinute: 18 * 60,
+  signalEndMinute: 2 * 60,
+  signalWindowLabel: 'ASIA 18:00-02:00 NY',
+});
 for (const b of bars) ref.push(Object.assign({}, b, {
   delta: (b.offv || Math.max(0, (b.vol + b.delta) / 2)) -
          (b.bidv || Math.max(0, (b.vol - b.delta) / 2)),

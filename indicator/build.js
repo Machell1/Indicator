@@ -8,11 +8,16 @@ const fs = require('fs');
 const path = require('path');
 
 const core = fs.readFileSync(path.join(__dirname, 'dale_core.js'), 'utf8');
+const orderflow = fs.readFileSync(path.join(__dirname, 'orderflow.js'), 'utf8');
 const wrapper = fs.readFileSync(path.join(__dirname, 'wrapper.js'), 'utf8');
 
 // strip the Node-only export block from the core
 const coreBody = core.replace(
   /\/\/ Node \+ Tradovate-module compatibility[\s\S]*$/,
+  ''
+).replace(/^'use strict';$/m, '');
+const orderflowBody = orderflow.replace(
+  /if \(typeof module !== 'undefined' && module\.exports\) \{[\s\S]*$/,
   ''
 ).replace(/^'use strict';$/m, '');
 
@@ -32,8 +37,9 @@ const banner = `/*
  *    The grades were measured on upVolume - downVolume: corr 0.87, exact
  *    match on 24% of bars. Signature + flow-quit timing may differ a
  *    little from the backtest; levels/profiles are delta-free.
- *  - Grades were measured with NO time-of-day gate; this indicator (like
- *    the MT5 version and the playbook) only signals 09:00-11:00 NY.
+ *  - Grades were measured with NO time-of-day gate. The deployed session
+ *    window is configurable and defaults to 18:00-02:00 New York for the
+ *    requested Asian-session workflow; events in this window are ungraded.
  *  - Signals require the prior session to pass the harness liquidity gate
  *    (>= 2000 contracts, >= 120 minutes) -- thin sessions draw levels
  *    flagged [THIN] and stand down, matching how the grades were measured.
@@ -45,6 +51,11 @@ const banner = `/*
  *    absorption undetectable in NY hours. Same concept, local calibration.
  *  - No alerts: Tradovate custom indicators cannot fire alerts. This tool
  *    draws; the playbook's alert-driven routine stays on MT5.
+ *  - Price-level absorption uses d.profile() executed bid/ask volume. It
+ *    cannot see resting DOM liquidity, cancellations, queue position, or
+ *    icebergs; red/green zones are footprint candidates, not proof.
+ *  - Funded-account sizing is advisory and uses user-entered limits. The
+ *    indicator cannot read account equity, fills, P&L, or broker rules.
  *
  * INSTALL: Tradovate -> Charts module -> Indicators -> Indicator Editor
  * (Code Explorer) -> New Indicator -> replace the template with this whole
@@ -56,6 +67,8 @@ const banner = `/*
  */
 `;
 
-const out = banner + wrapper.replace('/* __CORE_SPLICE__ */', coreBody);
+const out = banner + wrapper
+  .replace('/* __CORE_SPLICE__ */', coreBody)
+  .replace('/* __ORDERFLOW_SPLICE__ */', orderflowBody);
 fs.writeFileSync(path.join(__dirname, 'TraderMachell.js'), out);
 console.log('wrote TraderMachell.js (' + out.length + ' bytes)');
