@@ -241,6 +241,15 @@ f_target(entry, dirn, atr, rr, pocArr) =>
         tp := entry + dirn * rr
     tp
 
+f_slOrd(long) =>
+    long ? "SELL STOP" : "BUY STOP"
+
+f_tpOrd(long) =>
+    long ? "SELL LIMIT" : "BUY LIMIT"
+
+f_entryOrd(long, kind) =>
+    kind == "ACCUM" ? (long ? "BUY LIMIT" : "SELL LIMIT") : (long ? "BUY MKT" : "SELL MKT")
+
 // ─── rolling buffers ───────────────────────────────────────────────────────
 int sk = f_sessionKey()
 bool newSess = ta.change(sk) != 0
@@ -697,9 +706,40 @@ var array<line> sigLines = array.new<line>()
 var array<box> sigBoxes = array.new<box>()
 var array<label> sigLabels = array.new<label>()
 
+var label lblPoc = na
+var label lblVah = na
+var label lblVal = na
+var label lblAcc = na
+
+if barstate.islast
+    label.delete(lblPoc)
+    label.delete(lblVah)
+    label.delete(lblVal)
+    label.delete(lblAcc)
+    lblPoc := na
+    lblVah := na
+    lblVal := na
+    lblAcc := na
+    int lx = bar_index + 12
+    if showLvl and showPrev and not na(pPoc)
+        lblPoc := label.new(lx, pPoc, "PREV POC  " + str.tostring(pPoc, format.mintick),
+             style = label.style_label_left, color = color.new(cPoc, 20), textcolor = cPoc, size = size.tiny)
+        lblVah := label.new(lx, pVah, "VAH  " + str.tostring(pVah, format.mintick),
+             style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny)
+        lblVal := label.new(lx, pVal, "VAL  " + str.tostring(pVal, format.mintick),
+             style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny)
+    if not na(accLvl) and (not cleanSignals or useAccum)
+        lblAcc := label.new(lx, accLvl, "ACCUM POC  " + str.tostring(accLvl, format.mintick),
+             style = label.style_label_left, color = color.new(cAcc, 20), textcolor = cAcc, size = size.tiny)
+
 if sigBuy or sigSell
     color sigCol = sigBuy ? cBuy : cSell
     string sigSide = sigBuy ? "BUY" : "SELL"
+    string entryOrd = f_entryOrd(sigBuy, eKind)
+    string slOrd = f_slOrd(sigBuy)
+    string tpOrd = f_tpOrd(sigBuy)
+    float risk = math.abs(ePx - eSl)
+    float toTp = math.abs(eTp - ePx)
     int x0 = bar_index
     int x1 = bar_index + 12
     array.push(sigLines, line.new(x0, ePx, x1, ePx, color = color.new(#78909C, 30), width = 1))
@@ -712,15 +752,19 @@ if sigBuy or sigSell
              border_width = 0, bgcolor = color.new(cTp, 100 - zoneOpacity)))
     array.push(sigLabels, label.new(x0, ePx, sigBuy ? "\u25B2" : "\u25BC",
          style = label.style_none, color = na, textcolor = sigCol, size = size.large))
-    array.push(sigLabels, label.new(x0, ePx, sigSide + "  " + eKind,
+    array.push(sigLabels, label.new(x0, ePx, sigSide + "  " + eKind + " SETUP",
          style = sigBuy ? label.style_label_up : label.style_label_down,
          color = color.new(sigCol, 15), textcolor = #FFFFFF, size = size.normal))
-    array.push(sigLabels, label.new(x1, eSl, "SL  " + str.tostring(eSl, format.mintick),
-         style = label.style_label_left, color = color.new(cSl, 20), textcolor = cSl, size = size.tiny))
-    array.push(sigLabels, label.new(x1, eTp, "TP  " + str.tostring(eTp, format.mintick),
-         style = label.style_label_left, color = color.new(cTp, 20), textcolor = cTp, size = size.tiny))
-    array.push(sigLabels, label.new(x1, ePx, sigSide + "  " + str.tostring(ePx, format.mintick),
-         style = label.style_label_left, color = color.new(sigCol, 20), textcolor = sigCol, size = size.tiny))
+    array.push(sigLabels, label.new(x1, ePx, entryOrd + "  ENTRY  " + str.tostring(ePx, format.mintick),
+         style = label.style_label_left, color = color.new(sigCol, 20), textcolor = sigCol, size = size.small))
+    array.push(sigLabels, label.new(x1, eSl, slOrd + "  SL  " + str.tostring(eSl, format.mintick),
+         style = label.style_label_left, color = color.new(cSl, 20), textcolor = cSl, size = size.small))
+    array.push(sigLabels, label.new(x1, eTp, tpOrd + "  TP  " + str.tostring(eTp, format.mintick),
+         style = label.style_label_left, color = color.new(cTp, 20), textcolor = cTp, size = size.small))
+    if risk > 0
+        array.push(sigLabels, label.new(x1, (ePx + eTp) / 2,
+             "R " + str.tostring(risk, format.mintick) + "  to TP " + str.tostring(toTp, format.mintick),
+             style = label.style_label_left, color = color.new(#78909C, 20), textcolor = #78909C, size = size.tiny))
     while array.size(sigLines) > 400
         line.delete(array.shift(sigLines))
     while array.size(sigBoxes) > 200
@@ -728,10 +772,9 @@ if sigBuy or sigSell
     while array.size(sigLabels) > 200
         label.delete(array.shift(sigLabels))
 
-// Extend open signal rays on last bar
+// Extend open signal rays + right-edge order labels on last bar
 if barstate.islast and not na(eBar)
     int x1 = bar_index + 12
-    // extend most recent lines if present
     int nl = array.size(sigLines)
     if nl >= 3
         line.set_x2(array.get(sigLines, nl - 3), x1)
@@ -741,6 +784,14 @@ if barstate.islast and not na(eBar)
     if nb >= 2 and tradeZones
         box.set_right(array.get(sigBoxes, nb - 2), x1)
         box.set_right(array.get(sigBoxes, nb - 1), x1)
+    int nlab = array.size(sigLabels)
+    // last signal block: arrow, setup, entry, sl, tp, [rr] = up to 6 labels
+    int block = math.min(6, nlab)
+    if block > 0
+        for li = 0 to block - 1
+            label lbl = array.get(sigLabels, nlab - block + li)
+            if li >= 2
+                label.set_x(lbl, x1)
 
 // ─── absorption zone bands ───────────────────────────────────────────────────
 var array<box> absBoxes = array.new<box>()
@@ -828,5 +879,7 @@ if showTbl and barstate.islast
     f_kv(5, "Delta source", deltaReal ? "intrabar " + lowTf : "range proxy (ungraded)",
          deltaReal ? #26A17B : #E0A33A)
 
-alertcondition(sigBuy, "TraderMachell BUY", "TraderMachell BUY signal")
-alertcondition(sigSell, "TraderMachell SELL", "TraderMachell SELL signal")
+alertcondition(sigBuy, "TraderMachell BUY",
+     "TraderMachell BUY — check chart for ENTRY / STOP / LIMIT bracket")
+alertcondition(sigSell, "TraderMachell SELL",
+     "TraderMachell SELL — check chart for ENTRY / STOP / LIMIT bracket")

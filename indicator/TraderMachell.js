@@ -1196,6 +1196,13 @@ function addSignalGraphics(items, labels, tradePlot, mi, endI, ev, fmt, O) {
   const long = ev.long;
   const col = long ? COLORS.buySig : COLORS.sellSig;
   const side = long ? "BUY" : "SELL";
+  const kind = ev.kind === "prior-poc" ? "STACK" :
+    ev.kind === "accum" ? "ACCUM" : (ev.kind || "").toUpperCase();
+  const entryOrd = kind === "ACCUM" ? (long ? "BUY LIMIT" : "SELL LIMIT") :
+    (long ? "BUY MKT" : "SELL MKT");
+  const slOrd = long ? "SELL STOP" : "BUY STOP";
+  const tpOrd = long ? "SELL LIMIT" : "BUY LIMIT";
+  const risk = Math.abs(ev.entry - ev.sl);
   const tMs = ev.tMs;
   const ext = Math.max(mi + 1, endI + 2);
   items.push(ray("enL" + tMs, mi, ev.entry, "#78909C", 1, 3));
@@ -1209,14 +1216,19 @@ function addSignalGraphics(items, labels, tradePlot, mi, endI, ev, fmt, O) {
   }
   items.push(txt("sgA" + tMs, mi, ev.entry, long ? "\u25B2" : "\u25BC", col,
     long ? -18 : 18, { fontSize: 22, fontWeight: "bold" }, "centerMiddle"));
-  items.push(txt("sg" + tMs, mi, ev.entry, side, col, long ? -40 : 40,
-    { fontSize: 14, fontWeight: "bold" }, "centerMiddle"));
+  items.push(txt("sg" + tMs, mi, ev.entry, side + "  " + kind + " SETUP", col,
+    long ? -40 : 40, { fontSize: 14, fontWeight: "bold" }, "centerMiddle"));
   labels.push({ key: "enT" + tMs, price: ev.entry,
-    text: side + "  " + fmt(ev.entry), color: col, font: FONT_SM });
+    text: entryOrd + "  ENTRY  " + fmt(ev.entry), color: col, font: FONT_SM });
   labels.push({ key: "slT" + tMs, price: ev.sl,
-    text: "SL  " + fmt(ev.sl), color: COLORS.sl, font: FONT_SM });
+    text: slOrd + "  SL  " + fmt(ev.sl), color: COLORS.sl, font: FONT_SM });
   labels.push({ key: "tpT" + tMs, price: ev.tp,
-    text: "TP  " + fmt(ev.tp), color: COLORS.tp, font: FONT_SM });
+    text: tpOrd + "  TP  " + fmt(ev.tp), color: COLORS.tp, font: FONT_SM });
+  if (risk > 0) {
+    labels.push({ key: "rrT" + tMs, price: (ev.entry + ev.tp) / 2,
+      text: "R " + fmt(risk) + "  to TP " + fmt(Math.abs(ev.tp - ev.entry)),
+      color: "#78909C", font: FONT_SM });
+  }
   if (O.tradeZones)
     tradePlot.push({ j0: mi, j1: endI, entry: ev.entry, sl: ev.sl, tp: ev.tp, long, key: tMs });
 }
