@@ -528,13 +528,16 @@ class traderMachell {
   _syncCoreSession() {
     const p = this.props || {};
     const mode = [0, 1, 2].indexOf(Number(p.sessionWindow)) >= 0
-      ? Number(p.sessionWindow) : 1;
+      ? Number(p.sessionWindow) : 2;
     Object.assign(this.core.cfg, {
       sessionWindow: mode,
       asianStartHour: Math.max(0, Math.min(23, pNum(p.asianStart, 18))),
       asianEndHour: Math.max(0, Math.min(23, pNum(p.asianEnd, 3))),
       nyStartHour: Math.max(0, Math.min(23, pNum(p.nyStart, 9))),
       nyEndHour: Math.max(0, Math.min(23, pNum(p.nyEnd, 11))),
+      avoidPreLon: pBool(p.avoidPreLon, true),
+      preLonStartHour: Math.max(0, Math.min(23, pNum(p.preLonStart, 2))),
+      preLonEndHour: Math.max(0, Math.min(23, pNum(p.preLonEnd, 3))),
     });
   }
 
@@ -1906,11 +1909,14 @@ module.exports = {
     edgeWidth: predef.paramSpecs.number(140, 10, 20), // edge profile max row width, px
     edgeOffset: predef.paramSpecs.number(170, 10, 0), // px inboard from the pane edge (sits left of the community VZO at 150)
     rowOpacity: predef.paramSpecs.number(20, 1, 0),   // row opacity 0..100 (first guess -- calibrate live like the band)
-    sessionWindow: predef.paramSpecs.number(1, 1, 0), // 0=NY 9-11, 1=Asian 18-3 (default), 2=both
+    sessionWindow: predef.paramSpecs.number(2, 1, 0), // 0=NY, 1=Asian, 2=both (default)
     asianStart: predef.paramSpecs.number(18, 1, 0),   // Asian window start hour (NY clock)
     asianEnd: predef.paramSpecs.number(3, 1, 0),      // Asian window end hour (wraps midnight)
     nyStart: predef.paramSpecs.number(9, 1, 0),
     nyEnd: predef.paramSpecs.number(11, 1, 0),
+    avoidPreLon: predef.paramSpecs.number(1, 1, 0),   // 1 = skip pre-London open hour
+    preLonStart: predef.paramSpecs.number(2, 1, 0),   // blackout start (default 02:00 NY)
+    preLonEnd: predef.paramSpecs.number(3, 1, 0),     // blackout end (default 03:00 NY)
     absorbZones: predef.paramSpecs.number(1, 1, 0),   // 1 = translucent bid/ask absorption bands at levels
     absorbOpacity: predef.paramSpecs.number(35, 1, 0),// absorption band opacity 0..100
     absorbMarks: predef.paramSpecs.number(0, 1, 0),   // 1 = legacy orange diamond marks

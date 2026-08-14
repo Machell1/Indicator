@@ -32,9 +32,8 @@ const banner = `/*
  *    The grades were measured on upVolume - downVolume: corr 0.87, exact
  *    match on 24% of bars. Signature + flow-quit timing may differ a
  *    little from the backtest; levels/profiles are delta-free.
- *  - Grades were measured with NO time-of-day gate; this indicator defaults
- *    to the Asian session (18:00-03:00 NY) for FundedNext Rapid Daily;
- *    sessionWindow=0 restores NY 09:00-11:00 only.
+ *  - Grades were measured with NO time-of-day gate; defaults trade Asian
+ *    18:00-03:00 NY plus NY 09:00-11:00, skipping 02:00-03:00 pre-London.
  *  - Signals require the prior session to pass the harness liquidity gate
  *    (>= 2000 contracts, >= 120 minutes) -- thin sessions draw levels
  *    flagged [THIN] and stand down, matching how the grades were measured.

@@ -14,9 +14,8 @@
  *    The grades were measured on upVolume - downVolume: corr 0.87, exact
  *    match on 24% of bars. Signature + flow-quit timing may differ a
  *    little from the backtest; levels/profiles are delta-free.
- *  - Grades were measured with NO time-of-day gate; this indicator defaults
- *    to the Asian session (18:00-03:00 NY) for FundedNext Rapid Daily;
- *    sessionWindow=0 restores NY 09:00-11:00 only.
+ *  - Grades were measured with NO time-of-day gate; defaults trade Asian
+ *    18:00-03:00 NY plus NY 09:00-11:00, skipping 02:00-03:00 pre-London.
  *  - Signals require the prior session to pass the harness liquidity gate
  *    (>= 2000 contracts, >= 120 minutes) -- thin sessions draw levels
  *    flagged [THIN] and stand down, matching how the grades were measured.
@@ -200,7 +199,10 @@ const CFG = {
   nyEndHour: 11,
   asianStartHour: 18,  // Asian session start, New York (Tokyo open ~19:00)
   asianEndHour: 3,     // Asian session end (wraps midnight)
-  sessionWindow: 1,    // 0 = NY only, 1 = Asian only, 2 = both
+  sessionWindow: 2,    // 0 = NY only, 1 = Asian only, 2 = both (default)
+  avoidPreLon: true,   // skip 1st pre-London open hour (manipulation window)
+  preLonStartHour: 2,  // pre-London blackout start (NY clock)
+  preLonEndHour: 3,    // pre-London blackout end (exclusive)
   barMinutes: 1,       // chart bar size; scales the ATR factor + session mins
   liquidMinVol: 2000,  // prior session must have traded this to be trusted
   liquidMinBars: 120,  // ...and have this many bars (harness liquidity gate)
@@ -255,18 +257,29 @@ function inNyWindow(tMs, cfg) {
 function inAsianWindow(tMs, cfg) {
   return inHourWindow(tMs, cfg.asianStartHour, cfg.asianEndHour);
 }
+function inPreLonBlackout(tMs, cfg) {
+  if (!cfg.avoidPreLon) return false;
+  return inHourWindow(tMs, cfg.preLonStartHour, cfg.preLonEndHour);
+}
 function inTradeWindow(tMs, cfg) {
   const mode = Number(cfg.sessionWindow);
-  if (mode === 0) return inNyWindow(tMs, cfg);
-  if (mode === 2) return inNyWindow(tMs, cfg) || inAsianWindow(tMs, cfg);
-  return inAsianWindow(tMs, cfg);   // default: Asian (FundedNext Rapid Daily)
+  let inWin;
+  if (mode === 0) inWin = inNyWindow(tMs, cfg);
+  else if (mode === 2) inWin = inNyWindow(tMs, cfg) || inAsianWindow(tMs, cfg);
+  else inWin = inAsianWindow(tMs, cfg);
+  if (inWin && inPreLonBlackout(tMs, cfg)) inWin = false;
+  return inWin;
 }
 function sessionWindowLabel(cfg) {
   const mode = Number(cfg.sessionWindow);
-  if (mode === 0) return 'NY ' + cfg.nyStartHour + ':00-' + cfg.nyEndHour + ':00';
-  if (mode === 2) return 'Asian+' + cfg.asianStartHour + '-' + cfg.asianEndHour +
-    ' & NY ' + cfg.nyStartHour + '-' + cfg.nyEndHour;
-  return 'Asian ' + cfg.asianStartHour + ':00-' + cfg.asianEndHour + ':00 NY';
+  let label;
+  if (mode === 0) label = 'NY ' + cfg.nyStartHour + ':00-' + cfg.nyEndHour + ':00';
+  else if (mode === 2) label = 'Asian ' + cfg.asianStartHour + '-' + cfg.asianEndHour +
+    ' + NY ' + cfg.nyStartHour + '-' + cfg.nyEndHour;
+  else label = 'Asian ' + cfg.asianStartHour + ':00-' + cfg.asianEndHour + ':00 NY';
+  if (cfg.avoidPreLon)
+    label += ' (no ' + cfg.preLonStartHour + '-' + cfg.preLonEndHour + ' pre-Lon)';
+  return label;
 }
 
 // exact floor division matching CPython's float `//` (float_divmod), so bin
@@ -893,6 +906,10 @@ class DaleCore {
     else if (P.touchedAt >= 0) out.status = 'TOUCHED - waiting for absorption-initiative';
     else if (P.armed && inWin)
       out.status = P.side ? 'armed: buy the retest from above' : 'armed: sell the retest from below';
+    else if (P.armed && inPreLonBlackout(bar.tMs, cfg) && cfg.avoidPreLon &&
+      (inAsianWindow(bar.tMs, cfg) || inNyWindow(bar.tMs, cfg)))
+      out.status = 'stand down: pre-London manipulation hour (' +
+        cfg.preLonStartHour + ':00-' + cfg.preLonEndHour + ':00 NY)';
     else if (P.armed) out.status = 'armed - outside trade window (' +
       sessionWindowLabel(cfg) + ' NY)';
     else out.status = 'waiting: price has not moved 1 ATR from the level';
@@ -1339,13 +1356,16 @@ class traderMachell {
   _syncCoreSession() {
     const p = this.props || {};
     const mode = [0, 1, 2].indexOf(Number(p.sessionWindow)) >= 0
-      ? Number(p.sessionWindow) : 1;
+      ? Number(p.sessionWindow) : 2;
     Object.assign(this.core.cfg, {
       sessionWindow: mode,
       asianStartHour: Math.max(0, Math.min(23, pNum(p.asianStart, 18))),
       asianEndHour: Math.max(0, Math.min(23, pNum(p.asianEnd, 3))),
       nyStartHour: Math.max(0, Math.min(23, pNum(p.nyStart, 9))),
       nyEndHour: Math.max(0, Math.min(23, pNum(p.nyEnd, 11))),
+      avoidPreLon: pBool(p.avoidPreLon, true),
+      preLonStartHour: Math.max(0, Math.min(23, pNum(p.preLonStart, 2))),
+      preLonEndHour: Math.max(0, Math.min(23, pNum(p.preLonEnd, 3))),
     });
   }
 
@@ -2717,11 +2737,14 @@ module.exports = {
     edgeWidth: predef.paramSpecs.number(140, 10, 20), // edge profile max row width, px
     edgeOffset: predef.paramSpecs.number(170, 10, 0), // px inboard from the pane edge (sits left of the community VZO at 150)
     rowOpacity: predef.paramSpecs.number(20, 1, 0),   // row opacity 0..100 (first guess -- calibrate live like the band)
-    sessionWindow: predef.paramSpecs.number(1, 1, 0), // 0=NY 9-11, 1=Asian 18-3 (default), 2=both
+    sessionWindow: predef.paramSpecs.number(2, 1, 0), // 0=NY, 1=Asian, 2=both (default)
     asianStart: predef.paramSpecs.number(18, 1, 0),   // Asian window start hour (NY clock)
     asianEnd: predef.paramSpecs.number(3, 1, 0),      // Asian window end hour (wraps midnight)
     nyStart: predef.paramSpecs.number(9, 1, 0),
     nyEnd: predef.paramSpecs.number(11, 1, 0),
+    avoidPreLon: predef.paramSpecs.number(1, 1, 0),   // 1 = skip pre-London open hour
+    preLonStart: predef.paramSpecs.number(2, 1, 0),   // blackout start (default 02:00 NY)
+    preLonEnd: predef.paramSpecs.number(3, 1, 0),     // blackout end (default 03:00 NY)
     absorbZones: predef.paramSpecs.number(1, 1, 0),   // 1 = translucent bid/ask absorption bands at levels
     absorbOpacity: predef.paramSpecs.number(35, 1, 0),// absorption band opacity 0..100
     absorbMarks: predef.paramSpecs.number(0, 1, 0),   // 1 = legacy orange diamond marks

@@ -52,7 +52,10 @@ const CFG = {
   nyEndHour: 11,
   asianStartHour: 18,  // Asian session start, New York (Tokyo open ~19:00)
   asianEndHour: 3,     // Asian session end (wraps midnight)
-  sessionWindow: 1,    // 0 = NY only, 1 = Asian only, 2 = both
+  sessionWindow: 2,    // 0 = NY only, 1 = Asian only, 2 = both (default)
+  avoidPreLon: true,   // skip 1st pre-London open hour (manipulation window)
+  preLonStartHour: 2,  // pre-London blackout start (NY clock)
+  preLonEndHour: 3,    // pre-London blackout end (exclusive)
   barMinutes: 1,       // chart bar size; scales the ATR factor + session mins
   liquidMinVol: 2000,  // prior session must have traded this to be trusted
   liquidMinBars: 120,  // ...and have this many bars (harness liquidity gate)
@@ -107,18 +110,29 @@ function inNyWindow(tMs, cfg) {
 function inAsianWindow(tMs, cfg) {
   return inHourWindow(tMs, cfg.asianStartHour, cfg.asianEndHour);
 }
+function inPreLonBlackout(tMs, cfg) {
+  if (!cfg.avoidPreLon) return false;
+  return inHourWindow(tMs, cfg.preLonStartHour, cfg.preLonEndHour);
+}
 function inTradeWindow(tMs, cfg) {
   const mode = Number(cfg.sessionWindow);
-  if (mode === 0) return inNyWindow(tMs, cfg);
-  if (mode === 2) return inNyWindow(tMs, cfg) || inAsianWindow(tMs, cfg);
-  return inAsianWindow(tMs, cfg);   // default: Asian (FundedNext Rapid Daily)
+  let inWin;
+  if (mode === 0) inWin = inNyWindow(tMs, cfg);
+  else if (mode === 2) inWin = inNyWindow(tMs, cfg) || inAsianWindow(tMs, cfg);
+  else inWin = inAsianWindow(tMs, cfg);
+  if (inWin && inPreLonBlackout(tMs, cfg)) inWin = false;
+  return inWin;
 }
 function sessionWindowLabel(cfg) {
   const mode = Number(cfg.sessionWindow);
-  if (mode === 0) return 'NY ' + cfg.nyStartHour + ':00-' + cfg.nyEndHour + ':00';
-  if (mode === 2) return 'Asian+' + cfg.asianStartHour + '-' + cfg.asianEndHour +
-    ' & NY ' + cfg.nyStartHour + '-' + cfg.nyEndHour;
-  return 'Asian ' + cfg.asianStartHour + ':00-' + cfg.asianEndHour + ':00 NY';
+  let label;
+  if (mode === 0) label = 'NY ' + cfg.nyStartHour + ':00-' + cfg.nyEndHour + ':00';
+  else if (mode === 2) label = 'Asian ' + cfg.asianStartHour + '-' + cfg.asianEndHour +
+    ' + NY ' + cfg.nyStartHour + '-' + cfg.nyEndHour;
+  else label = 'Asian ' + cfg.asianStartHour + ':00-' + cfg.asianEndHour + ':00 NY';
+  if (cfg.avoidPreLon)
+    label += ' (no ' + cfg.preLonStartHour + '-' + cfg.preLonEndHour + ' pre-Lon)';
+  return label;
 }
 
 // exact floor division matching CPython's float `//` (float_divmod), so bin
@@ -745,6 +759,10 @@ class DaleCore {
     else if (P.touchedAt >= 0) out.status = 'TOUCHED - waiting for absorption-initiative';
     else if (P.armed && inWin)
       out.status = P.side ? 'armed: buy the retest from above' : 'armed: sell the retest from below';
+    else if (P.armed && inPreLonBlackout(bar.tMs, cfg) && cfg.avoidPreLon &&
+      (inAsianWindow(bar.tMs, cfg) || inNyWindow(bar.tMs, cfg)))
+      out.status = 'stand down: pre-London manipulation hour (' +
+        cfg.preLonStartHour + ':00-' + cfg.preLonEndHour + ':00 NY)';
     else if (P.armed) out.status = 'armed - outside trade window (' +
       sessionWindowLabel(cfg) + ' NY)';
     else out.status = 'waiting: price has not moved 1 ATR from the level';
