@@ -4,6 +4,41 @@
  * TraderMachell.js (the single module you paste into Tradovate's
  * Indicator Editor).
  *
+ * VISUAL SUITE v13 -- ASIA SESSION + ABSORPTION ZONES + RAPID DAILY RISK
+ * (docs/VISUAL_V13_ABSORPTION_ASIA.md):
+ *  - ABSORPTION ZONES (absZones=1, default): a display-only tracker fed
+ *    by the platform's EXECUTED order flow (offerVolume/bidVolume per
+ *    bar -- the only order-flow data the indicator API exposes; the
+ *    resting DOM is NOT available to custom indicators, so the playbook's
+ *    "big resting limit" read stays a manual DOM check). A bar qualifies
+ *    as absorption when volume >= absVolX x trailing median, its range is
+ *    compressed (<= 0.75 x median), and the losing aggressor side fails
+ *    to move price: heavy SELL aggression that closes off the lows =
+ *    sellers absorbed -> translucent GREEN demand zone; heavy BUY
+ *    aggression that closes off the highs = buyers absorbed -> translucent
+ *    RED supply zone. Zones carry the ABSORBED AMOUNT (the failed
+ *    aggressor side's contracts), merge when stacked at one level, extend
+ *    right until price CLOSES through the level, and their fill opacity
+ *    AND label font size scale with the amount absorbed. Fills ride the
+ *    LIVE-VERIFIED canvas-plotter alpha path (v10); rowsPlot=0 falls back
+ *    to the opaque-safe dashed outline + label (zero fill-alpha reliance).
+ *  - SESSION WINDOW (winStart/winEnd, NY hours): the signal window is now
+ *    configurable and WRAPS midnight; the default is the ASIAN session
+ *    18:00->03:00 NY (Globex open through the London handoff). Honesty:
+ *    the grades were measured with NO time-of-day gate and the playbook
+ *    discipline was 09:00-11:00 NY -- the banner discloses the active
+ *    window and marks non-playbook windows [ungraded window].
+ *  - FUNDEDNEXT RAPID DAILY risk line (acctSize=25/50/100): the account's
+ *    REAL rule card on the banner -- daily loss limit $500/$1000/$1250
+ *    (soft: hitting it pauses the day), EOD-trailing max loss
+ *    $1000/$2000/$2500 (hard breach), payout buffer = max loss + $100,
+ *    contract caps 2/4/6 minis or 20/40/60 micros -- plus per-signal
+ *    suggested size floor(risk$ / (SL ticks x tick value)) capped by the
+ *    account's contract limit, and the session's cumulative delta
+ *    (bid/ask proxy) for the accumulation read. Risk discipline [R], not
+ *    edge; the indicator cannot see account P&L -- the numbers are the
+ *    plan card, not live enforcement.
+ *
  * VISUAL SUITE v6 -- v5 + techniques learned from studying free community
  * indicator sources (docs/VISUAL_V6_SOURCES.md; all code here is original,
  * the studied repos are license-restricted and were used for technique
@@ -138,6 +173,37 @@ const VIS = {
   clusterATR: 0.25,     // labels closer than this (in ATR) share a stack
 };
 
+// ---- absorption-zone tracker configuration (v13) --------------------------
+// Detection is deliberately STRICTER than the engine's graded signature
+// churn bar (1.3x vol): zones fire anywhere in price, not just at an armed
+// level, so the bar must be an outlier to earn a zone. Display-only.
+const ABS = {
+  volX: 2.0,          // default volume multiple vs trailing median (param absVolX)
+  rngX: 0.75,         // range compression vs trailing median range
+  holdFrac: 0.40,     // close must sit >= this fraction off the rejected extreme
+  breakATR: 0.15,     // close beyond the zone edge by this many ATR kills it
+  mergeATR: 0.35,     // same-side zones within this many ATR merge (stacking)
+  maxZones: 8,        // active-zone cap; weakest absorbed amount drops first
+  maxAgeMs: 26 * 3600e3, // a zone untouched for a full session expires
+  winMins: 120,       // trailing stat window, minutes (same 2h basis as sigStatWindow)
+};
+
+// ---- FundedNext Futures RAPID DAILY rule card (fundednext.com/futures/rapid,
+// verified 2026-08: DLL soft-pauses the day; the EOD-trailing max loss is the
+// hard breach; buffer = start + max loss + $100 before payouts) -------------
+const RAPID = {
+  25:  { dll: 500,  maxLoss: 1000, mini: 2, micro: 20 },
+  50:  { dll: 1000, maxLoss: 2000, mini: 4, micro: 40 },
+  100: { dll: 1250, maxLoss: 2500, mini: 6, micro: 60 },
+};
+// per-tick dollar value by product (used for suggested sizing); unknown
+// products fall back to tickVal prop or 1 with a banner disclosure
+const TICK_VAL = {
+  GC: 10, MGC: 1, SI: 25, SIL: 5, NQ: 5, MNQ: 0.5, ES: 12.5, MES: 1.25,
+  YM: 5, MYM: 0.5, RTY: 5, M2K: 0.5, CL: 10, MCL: 1,
+};
+const MICROS = { MGC: 1, MNQ: 1, MES: 1, MYM: 1, MCL: 1, M2K: 1, SIL: 1 };
+
 // ALL colors are solid hex: fill alpha proved unreliable live (Bug A).
 // Values are tuned for Tradovate's dark chart theme at FULL opacity:
 // tails dark enough to recede behind price, VA a clear step brighter,
@@ -214,6 +280,12 @@ function pBool(v, dflt) {
 function pNum(v, dflt) {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+// NY hour prop: 0..23 valid (0 = midnight is a legal window edge, which
+// pNum's n > 0 gate would reject)
+function pHour(v, dflt) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 23 ? Math.floor(n) : dflt;
 }
 
 // ---- du emission transform (field report section 10) ---------------------
@@ -403,6 +475,11 @@ class traderMachell {
       // core builds no HTF composite below 5 sessions (dale_core "< 5"
       // gate) -- clamp so a dialog value of 1-4 can't silently starve it
       htfSessions: Math.max(5, Math.round(pNum(this.props && this.props.htfSessions, 20))),
+      // v13: configurable signal window, NY hours, midnight wrap supported
+      // by the core (start > end = overnight). DEFAULT = ASIAN SESSION
+      // 18:00->03:00 NY; the banner discloses the active window.
+      nyStartHour: pHour(this.props && this.props.winStart, 18),
+      nyEndHour: pHour(this.props && this.props.winEnd, 3),
     });
     // du-mode row caps, rescaled so a row's bar-width tracks real time when
     // the zoom buttons switch aggregation (Q1 resets the indicator anyway)
@@ -412,6 +489,12 @@ class traderMachell {
     this.wSess = cap(VIS.sessMaxBars);
     this.wAcc = cap(VIS.accMaxBars);
     this.vaBySession = {};   // sessionKey -> {vaLo, vaHi} for the vaFill plotter
+    // v13 absorption-zone tracker (display-only; rebuilt from the same
+    // committed-bar stream on any reset, so it needs no survival logic)
+    this.absWin = [];        // trailing {vol, rng} stats window
+    this.absZones = [];      // active zones {tms, endTms, side, pLo, pHi, amt, hits}
+    this.cumDelta = 0;       // session cumulative delta (bid/ask proxy)
+    this._cumDay = null;
     this.lastPushedMs = 0;
     this.lastOut = null;
     this.marks = [];              // {tMs, price, day, ev} -- anchors are
@@ -536,6 +619,12 @@ class traderMachell {
       edgeW: pNum(p.edgeWidth, 140),         // edge profile max row width, px
       edgeOff: Number.isFinite(Number(p.edgeOffset)) ? Number(p.edgeOffset) : 170,
       nodes: pBool(p.nodes, true),           // HVN/LVN ticks on the prior profile
+      abs: pBool(p.absZones, true),          // v13 absorption zones
+      absOp: pNum(p.absOpacity, 30),         // zone fill opacity 0..100 (plotter path)
+      acct: RAPID[Number(p.acctSize)] ? Number(p.acctSize) : 50, // Rapid Daily size, K
+      riskD: pNum(p.riskPerTrade, 0),        // $/trade; 0 = auto (25% of the DLL)
+      maxTrades: Math.max(1, Math.round(pNum(p.maxTrades, 2))),
+      tickVal: pNum(p.tickVal, 0),           // $/tick override; 0 = auto by product
       history: pBool(p.showHistory, false),
       alignTest: pBool(p.alignTest, false),
       diag: pBool(p.diag, false),
@@ -729,6 +818,11 @@ class traderMachell {
     }
     const out = this.core.push(bar);
     this.lastOut = out;
+    // v13: session cumulative delta (accumulation read; bid/ask proxy)
+    if (out.day !== this._cumDay) { this._cumDay = out.day; this.cumDelta = 0; }
+    this.cumDelta += bar.delta;
+    // v13: absorption-zone tracker (uses the aggressor split, not just delta)
+    this._absorbUpdate(bar, off, bid);
     if (out.absorb)
       this.marks.push({ tMs, price: bar.c, day: out.day,
         ev: { kind: "absorb", long: this.core.poc.side } });
@@ -737,6 +831,78 @@ class traderMachell {
     if (out.flowQuit)
       this.marks.push({ tMs, price: bar.c, day: out.day, ev: { kind: "flowquit" } });
     if (this.marks.length > 60) this.marks.shift();
+  }
+
+  // ---- v13 absorption-zone tracker (called once per COMMITTED bar) ----
+  // Order-flow semantics on this platform: offerVolume = contracts traded
+  // at the ask (BUY aggression), bidVolume = contracts traded at the bid
+  // (SELL aggression). Absorption = one side's aggression fails to move
+  // price on an outlier-volume, compressed-range bar:
+  //   sellers absorbed (delta <= 0, close holds off the lows)  -> GREEN
+  //   demand zone, amount = bidVolume (the sell aggression that failed);
+  //   buyers absorbed  (delta >= 0, close holds off the highs) -> RED
+  //   supply zone, amount = offerVolume.
+  // Zones merge when stacked at one level (amounts accumulate), die when
+  // price CLOSES through the level + buffer, expire after a full session,
+  // and the active set is capped (weakest absorbed amount drops first).
+  // DISPLAY-ONLY: nothing here feeds the signal machines, and the graded
+  // engine absorption (the signature churn bar) is untouched.
+  _absorbUpdate(bar, off, bid) {
+    const atr = this.core.atr;
+    const rng = bar.h - bar.l;
+    const Z = this.absZones;
+    // break + expiry scan runs on EVERY bar, even before stats warm up
+    if (atr > 0) {
+      for (let k = Z.length - 1; k >= 0; k--) {
+        const z = Z[k];
+        const brk = z.side === "G"
+          ? bar.c < z.pLo - ABS.breakATR * atr
+          : bar.c > z.pHi + ABS.breakATR * atr;
+        if (brk || bar.tMs - z.endTms > ABS.maxAgeMs) Z.splice(k, 1);
+      }
+    }
+    const W = this.absWin;
+    W.push({ vol: bar.vol, rng });
+    const cap = Math.max(20, Math.round(ABS.winMins / this.barMin));
+    if (W.length > cap) W.shift();
+    if (atr <= 0 || W.length < Math.max(10, cap >> 2)) return;
+    if (!(rng > 0) || !(bar.vol > 0)) return;
+    const vmed = median(W.map(x => x.vol));
+    const rngs = W.map(x => x.rng).filter(r => r > 0);
+    const rmed = median(rngs);
+    const vx = Number(this.props && this.props.absVolX);
+    const volX = Number.isFinite(vx) && vx >= 1 ? vx : ABS.volX;
+    if (!(vmed > 0) || !(rmed > 0)) return;
+    if (!(bar.vol >= volX * vmed) || !(rng <= ABS.rngX * rmed)) return;
+    // which aggressor failed? delta = offer - bid (buy - sell aggression)
+    let side = null, amt = 0;
+    if (bar.delta <= 0 && bar.c >= bar.l + ABS.holdFrac * rng) {
+      side = "G"; amt = bid;                    // sell aggression absorbed
+    } else if (bar.delta >= 0 && bar.c <= bar.h - ABS.holdFrac * rng) {
+      side = "R"; amt = off;                    // buy aggression absorbed
+    }
+    if (!side || !(amt > 0)) return;
+    const mid = (bar.h + bar.l) / 2;
+    let hit = null;
+    for (const z of Z) {
+      if (z.side !== side) continue;
+      if (Math.abs((z.pLo + z.pHi) / 2 - mid) <= ABS.mergeATR * atr) { hit = z; break; }
+    }
+    if (hit) {
+      hit.pLo = Math.min(hit.pLo, bar.l);
+      hit.pHi = Math.max(hit.pHi, bar.h);
+      hit.amt += amt;
+      hit.endTms = bar.tMs;
+      hit.hits += 1;
+    } else {
+      Z.push({ tms: bar.tMs, endTms: bar.tMs, side,
+        pLo: bar.l, pHi: bar.h, amt, hits: 1 });
+      if (Z.length > ABS.maxZones) {
+        let wk = 0;
+        for (let k = 1; k < Z.length; k++) if (Z[k].amt < Z[wk].amt) wk = k;
+        Z.splice(wk, 1);
+      }
+    }
   }
 
   map(d, i, history) {
@@ -944,6 +1110,7 @@ class traderMachell {
     // 3=HTF mirror); the list is priority-sorted before the frame ends so
     // the plotter's shared stroke budget degrades least-important last.
     this._plotProfiles = [];
+    this._plotZones = null;    // v13 absorption-zone fills (plotter path)
     const rowsToPlotter = O.rowsPlot && duMode;
     const futureKeys = new Set();   // filled by guards below + the final scan
     const idx = (t, layer) => {
@@ -991,6 +1158,27 @@ class traderMachell {
     // explains the mark.
     const q = this.barMin !== 1 ? "*" : "";
     const fmtL = p => fmt(p) + q;
+    // ---- v13 Rapid Daily risk plan (plan card + suggested sizing) ----
+    // The indicator cannot see account P&L: these are the account's rule
+    // numbers and a per-signal size suggestion, not live enforcement.
+    const RC = RAPID[O.acct];
+    const prod = (this.contractInfo &&
+      (this.contractInfo.product ||
+        String(this.contractInfo.contract || "").replace(/\d.*$/, ""))) || "";
+    const isMicro = !!MICROS[prod];
+    const tickValEff = O.tickVal > 0 ? O.tickVal : (TICK_VAL[prod] || 0);
+    const conCap = isMicro ? RC.micro : RC.mini;
+    // auto risk = 25% of the DLL: two playbook trades + slippage still
+    // leave headroom under the soft daily stop
+    const riskEff = O.riskD > 0 ? O.riskD : RC.dll * 0.25;
+    const sizeFor = sv => {
+      const ts2 = (this.contractInfo && this.contractInfo.tickSize > 0)
+        ? this.contractInfo.tickSize : 0;
+      if (!(ts2 > 0) || !(tickValEff > 0)) return null;
+      const tks = Math.max(1, Math.round(Math.abs(sv.entry - sv.sl) / ts2));
+      return { t: tks,
+        n: Math.max(0, Math.min(conCap, Math.floor(riskEff / (tks * tickValEff)))) };
+    };
 
     // (the status banner is emitted at the END of this function: the
     // [mirror desync] / [anchor overshoot] flags are raised inside the
@@ -1343,6 +1531,47 @@ class traderMachell {
         COLORS.leg, FONT_SM);
     }
 
+    // ---- v13 ABSORPTION ZONES: translucent demand/supply bands ----
+    // GREEN = sell aggression absorbed at the level (passive demand);
+    // RED = buy aggression absorbed (passive supply). The band spans the
+    // zone's true absorbed price range and extends right until price
+    // closes through it (the tracker removes broken zones). Fill opacity
+    // and label font size scale with the ABSORBED AMOUNT; the label
+    // prints that amount in contracts. Fills ride the plotter path (the
+    // live-verified alpha pipeline); rowsPlot=0 keeps the opaque-safe
+    // dashed outline + label only. Zones whose birth bar predates loaded
+    // history surface via the offscreen marker, never a fabricated anchor.
+    if (O.abs && this.absZones.length) {
+      let amtMax = 0;
+      for (const z of this.absZones) if (z.amt > amtMax) amtMax = z.amt;
+      const zFills = [];
+      for (const z of this.absZones) {
+        const zx = idx(z.tms, "abs");
+        if (zx === undefined) {
+          if (this.tmsList.length && z.tms < this.tmsList[0]) offscreen = true;
+          continue;
+        }
+        if (zx > i) continue;                  // never born in the future grid
+        const col = z.side === "G" ? COLORS.buy : COLORS.sell;
+        const s = amtMax > 0 ? z.amt / amtMax : 0;   // 0..1 strength
+        if (rowsToPlotter)
+          zFills.push({ anchor: zx, w: Math.max(1, i - zx + 1),
+            pLo: z.pLo, pHi: z.pHi, color: col,
+            opMul: 0.35 + 0.65 * s });
+        // dashed outline: crisp zone edges over the translucent fill, and
+        // the whole zone in rowsPlot=0 mode (zero fill-alpha reliance)
+        items.push(box("azB" + z.tms, zx, i + 1, z.pHi, z.pLo, col, 3));
+        // amount label INSIDE the band, font stepped by absorbed strength
+        const zFont = s > 0.66 ? FONT : (s > 0.33 ? FONT_SM : FONT_XS);
+        const amtTxt = z.amt >= 1000
+          ? (z.amt / 1000).toFixed(1) + "K" : String(Math.round(z.amt));
+        items.push(txt("azT" + z.tms, zx + 1, (z.pLo + z.pHi) / 2,
+          (z.side === "G" ? "\u25B2 " : "\u25BC ") + amtTxt + " absorbed",
+          col, 0, zFont));
+      }
+      if (zFills.length) this._plotZones = zFills;
+    }
+
     // ---- marks: absorption, signals, flow-quit (noise-controlled) ----
     // Current session: full detail. Prior sessions: signals shrink to bare
     // arrows (showHistory=1 restores short labels); absorption and
@@ -1371,11 +1600,14 @@ class traderMachell {
       items.push(txt("sgA" + mk.tMs, mi, ev.entry,
         ev.long ? "\u25B2" : "\u25BC", col, ev.long ? -10 : 10,
         { fontSize: 16, fontWeight: "bold" }, "centerMiddle"));
-      if (today)
+      if (today) {
+        const sz = sizeFor(ev);
         items.push(txt("sg" + mk.tMs, mi, ev.entry,
           (ev.long ? "  BUY " : "  SELL ") + ev.kind + " " + fmtL(ev.entry) +
-          "  " + ev.tag + q + (ev.htf ? "  " + ev.htf : ""), col,
+          "  " + ev.tag + q + (ev.htf ? "  " + ev.htf : "") +
+          (sz ? "  ~" + sz.n + (isMicro ? " micro" : " mini") : ""), col,
           ev.long ? -26 : 26, FONT_SM, "centerMiddle"));
+      }
       else if (O.history)
         items.push(txt("sg" + mk.tMs, mi, ev.entry,
           (ev.long ? "BUY " : "SELL ") + ev.kind, col,
@@ -1389,12 +1621,16 @@ class traderMachell {
         "ABSORPTION", COLORS.absorb, lastAbsorb.ev.long ? 26 : -26,
         FONT_SM, "centerMiddle"));
     }
+    let liveSz = null;
     if (lastSig && lastSigIdx !== undefined) {
       const ev = lastSig.ev;
+      liveSz = sizeFor(ev);
       items.push(ray("tpL", lastSigIdx, ev.tp, COLORS.tp, 2, 3));
       lab("tpT", ev.tp, "TP " + fmtL(ev.tp), COLORS.tp);
       items.push(ray("slL", lastSigIdx, ev.sl, COLORS.sl, 2, 2));
-      lab("slT", ev.sl, "SL " + fmtL(ev.sl), COLORS.sl);
+      lab("slT", ev.sl, "SL " + fmtL(ev.sl) +
+        (liveSz ? "  " + liveSz.t + "t = " + liveSz.n + (isMicro ? " micro" : " mini") : ""),
+        COLORS.sl);
     }
 
     // ---- v12: right-edge pinned LIVE-SESSION profile (HANDOFF_v12,
@@ -1471,7 +1707,7 @@ class traderMachell {
           ? slotRect(DU_T(x0), Math.max(10, Math.round((i - x0) / 3)), pLo, pHi)
           : pxrect(x0, 80, pLo, pHi)],
         fillStyle: { color: COLORS.test } });
-      items.push(frameTxt("alnT", 70, O.diag ? 90 : 72,
+      items.push(frameTxt("alnT", 70, O.diag ? 108 : 90,
         "ALIGN TEST: white POC ray must bisect the magenta row. Row ABOVE ray => set RECT_Y_ANCHOR='top'",
         COLORS.test, FONT_SM));
     }
@@ -1600,7 +1836,28 @@ class traderMachell {
           : "      HTF: n/a - " + this.core.sessions.length +
             "/5 sessions loadable here (read HTF on 30M)"),
         COLORS.dim, FONT_SM));
+    // ---- v13 Rapid Daily risk line (the account's real rule card) ----
+    items.push(frameTxt("statR", 70, 72,
+      "RAPID DAILY " + O.acct + "K  |  DLL $" + RC.dll + " soft" +
+      "  |  EOD trail $" + RC.maxLoss + " hard" +
+      "  |  buffer $" + (RC.maxLoss + 100) +
+      "  |  risk $" + Math.round(riskEff) + "/trade, max " + O.maxTrades + "/day" +
+      ", cap " + conCap + (isMicro ? " micro" : " mini") +
+      (liveSz ? "  |  live SL " + liveSz.t + "t = " + liveSz.n : "") +
+      "  |  \u03A3\u0394 " + (this.cumDelta > 0 ? "+" : "") + Math.round(this.cumDelta),
+      COLORS.status, FONT_SM));
     const ctx = [];
+    // active signal window, always visible; anything other than the
+    // graded playbook discipline (09-11 NY) is marked ungraded
+    {
+      const wS = this.core.cfg.nyStartHour, wE = this.core.cfg.nyEndHour;
+      const hh2 = h => (h < 10 ? "0" : "") + h;
+      ctx.push("win " + hh2(wS) + "-" + hh2(wE) + " NY" +
+        (wS === 18 && wE === 3 ? " (ASIA)" : "") +
+        (wS === 9 && wE === 11 ? " (playbook)" : " [window ungraded]"));
+    }
+    if (!(tickValEff > 0))
+      ctx.push("tickVal unknown (" + (prod || "?") + ") - set tickVal for sizing");
     if (out.htf) {
       const pxNow = d.close();
       ctx.push("HTF: " + (pxNow > out.htf.vah ? "above value (info, not a gate)"
@@ -1667,7 +1924,7 @@ class traderMachell {
       // tf= settles elementSize semantics per timeframe in one screenshot
       // (TIMEFRAME_ANCHORING_SPEC.md section 1.2)
       const cd4 = this.chartDescription;
-      items.push(frameTxt("stat4", 70, 72,
+      items.push(frameTxt("stat4", 70, 90,
         "tf=" + (cd4 ? cd4.underlyingType + "/" + cd4.elementSize : "none") +
         " barMin=" + this.barMin +
         " bidx=" + (typeof d.index === "function" ? d.index() : "-") +
@@ -1725,6 +1982,34 @@ function vaFillPlotter(canvas, instance, history) {
         }
       }
     }
+    // ---- v13 translucent ABSORPTION-ZONE fills (drawn FIRST so profile
+    // rows and candles paint over them -- zones are backdrop). One
+    // bar-wide vertical strip per column across the zone's span; opacity
+    // = absOpacity x the zone's absorbed-amount multiplier (0.35..1), so
+    // a heavily absorbed level visibly outweighs a light one. ----
+    const zones = instance._plotZones;
+    if (zones && zones.length && pBool(props.absZones, true)) {
+      let zOp = Number(props.absOpacity);
+      if (!Number.isFinite(zOp)) zOp = 30;
+      zOp = Math.max(0, Math.min(100, zOp)) / 100;
+      if (zOp > 0) {
+        let zBudget = 4000;
+        for (const Zn of zones) {
+          if (zBudget <= 0) break;
+          const op = Math.max(0.01, Math.min(1, zOp * (Zn.opMul || 1)));
+          const jTo = Math.min(Zn.anchor + Zn.w, history.data.length - 1);
+          for (let j = Zn.anchor; j <= jTo && zBudget > 0; j++) {
+            const item = history.get(j);
+            if (!item) continue;
+            const x = plt.x.get(item);
+            canvas.drawLine(plt.offset(x, Zn.pLo), plt.offset(x, Zn.pHi),
+              { color: Zn.color, relativeWidth: 1, opacity: op });
+            zBudget--;
+          }
+        }
+      }
+    }
+
     // ---- translucent profile ROWS (v10: the current-session profile
     // moves off the opaque Shapes path so it stops hiding the candles it
     // sits on). buildItems publishes the frame's row set + anchor/width
@@ -1813,6 +2098,19 @@ module.exports = {
     edgeWidth: predef.paramSpecs.number(140, 10, 20), // edge profile max row width, px
     edgeOffset: predef.paramSpecs.number(170, 10, 0), // px inboard from the pane edge (sits left of the community VZO at 150)
     rowOpacity: predef.paramSpecs.number(20, 1, 0),   // row opacity 0..100 (first guess -- calibrate live like the band)
+    // ---- v13: session window (NY hours; start > end wraps midnight).
+    // Default = ASIAN session 18:00->03:00 NY. Playbook discipline = 9/11.
+    winStart: predef.paramSpecs.number(18, 1, 0),     // signal window start, NY hour 0-23
+    winEnd: predef.paramSpecs.number(3, 1, 0),        // signal window end, NY hour 0-23
+    // ---- v13: absorption zones (executed order-flow based) ----
+    absZones: predef.paramSpecs.number(1, 1, 0),      // 1 = translucent absorption zones
+    absOpacity: predef.paramSpecs.number(30, 1, 0),   // zone fill opacity 0..100
+    absVolX: predef.paramSpecs.number(2, 0.1, 1),     // absorption volume multiple vs 2h median
+    // ---- v13: FundedNext Rapid Daily risk plan ----
+    acctSize: predef.paramSpecs.number(50, 25, 25),   // account size in K: 25 / 50 / 100
+    riskPerTrade: predef.paramSpecs.number(0, 10, 0), // $ risk per trade; 0 = auto (25% of DLL)
+    maxTrades: predef.paramSpecs.number(2, 1, 1),     // self-imposed trades/day cap (playbook)
+    tickVal: predef.paramSpecs.number(0, 0.5, 0),     // $/tick override; 0 = auto by product
     showHistory: predef.paramSpecs.number(0, 1, 0),   // 1 = label signals from prior sessions
     alignTest: predef.paramSpecs.number(0, 1, 0),     // 1 = Rectangle y-anchor self-test row
     diag: predef.paramSpecs.number(0, 1, 0),          // 1 = show raw prop delivery on the banner

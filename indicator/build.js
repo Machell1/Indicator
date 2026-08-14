@@ -32,8 +32,21 @@ const banner = `/*
  *    The grades were measured on upVolume - downVolume: corr 0.87, exact
  *    match on 24% of bars. Signature + flow-quit timing may differ a
  *    little from the backtest; levels/profiles are delta-free.
- *  - Grades were measured with NO time-of-day gate; this indicator (like
- *    the MT5 version and the playbook) only signals 09:00-11:00 NY.
+ *  - Grades were measured with NO time-of-day gate. The signal window is
+ *    configurable (winStart/winEnd, NY hours, midnight wrap supported)
+ *    and DEFAULTS to the ASIAN session 18:00-03:00 NY for the FundedNext
+ *    Rapid Daily routine; the playbook's graded discipline was
+ *    09:00-11:00 NY. The banner always shows the active window and marks
+ *    non-playbook windows [window ungraded].
+ *  - ABSORPTION ZONES read the platform's EXECUTED order flow
+ *    (offerVolume/bidVolume). The resting order book (DOM depth) is NOT
+ *    exposed to custom indicators -- the playbook's "big resting limit"
+ *    confirmation remains a manual DOM read. Zones are display-only and
+ *    carry no backtest grade.
+ *  - The RAPID DAILY risk line is the account's published rule card
+ *    (DLL soft-stop, EOD-trailing max loss, payout buffer, contract
+ *    caps) plus suggested sizing -- risk discipline, not edge, and NOT
+ *    live enforcement: the indicator cannot see account P&L.
  *  - Signals require the prior session to pass the harness liquidity gate
  *    (>= 2000 contracts, >= 120 minutes) -- thin sessions draw levels
  *    flagged [THIN] and stand down, matching how the grades were measured.
