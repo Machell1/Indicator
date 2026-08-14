@@ -226,12 +226,13 @@ f_target(entry, dirn, atr, rr, pocArr) =>
     float tp = na
     float best = na
     int n = array.size(pocArr)
-    int start = math.max(0, n - priorDays)
-    for i = start to n - 1
-        float p = array.get(pocArr, i)
-        if (p - entry) * dirn > 0.05 * atr
-            if na(best) or math.abs(p - entry) < math.abs(best - entry)
-                best := p
+    if n > 0
+        int start = math.max(0, n - priorDays)
+        for i = start to n - 1
+            float p = array.get(pocArr, i)
+            if (p - entry) * dirn > 0.05 * atr
+                if na(best) or math.abs(p - entry) < math.abs(best - entry)
+                    best := p
     if not na(best)
         tp := best - dirn * tpFrontATR * atr
     else
@@ -508,33 +509,38 @@ if not na(atrV) and atrV > 0 and array.size(sV) >= 5
         if not na(accLvl)
             array.push(lvlPx, accLvl)
             array.push(lvlTag, "ACCUM")
-        for li = 0 to array.size(lvlPx) - 1
-            float lp = array.get(lvlPx, li)
-            if low > lp + zone or high < lp - zone
-                continue
-            bool holds = lp >= low - zone and lp <= high + zone
-            if not holds
-                continue
-            bool bidAbs = churn and bidVol >= offerVol * 1.05 and low >= lp - zone
-            bool offerAbs = churn and offerVol >= bidVol * 1.05 and high <= lp + zone
-            if not bidAbs and not offerAbs
-                continue
-            float stepK = math.max(atrV * 0.05, syminfo.mintick)
-            int key = int(math.round(lp / stepK))
-            int zi = -1
-            for z = 0 to array.size(azPrice) - 1
-                if int(math.round(array.get(azPrice, z) / stepK)) == key
-                    zi := z
-                    break
-            if zi < 0
-                array.push(azPrice, lp)
-                array.push(azBid, bidAbs ? bidVol : 0.0)
-                array.push(azOffer, offerAbs ? offerVol : 0.0)
-            else
-                if bidAbs
-                    array.set(azBid, zi, array.get(azBid, zi) + bidVol)
-                if offerAbs
-                    array.set(azOffer, zi, array.get(azOffer, zi) + offerVol)
+        // Pine runs `for i = 0 to -1` once when the array is empty — guard first.
+        int lvlN = array.size(lvlPx)
+        if lvlN > 0
+            for li = 0 to lvlN - 1
+                float lp = array.get(lvlPx, li)
+                if low > lp + zone or high < lp - zone
+                    continue
+                bool holds = lp >= low - zone and lp <= high + zone
+                if not holds
+                    continue
+                bool bidAbs = churn and bidVol >= offerVol * 1.05 and low >= lp - zone
+                bool offerAbs = churn and offerVol >= bidVol * 1.05 and high <= lp + zone
+                if not bidAbs and not offerAbs
+                    continue
+                float stepK = math.max(atrV * 0.05, syminfo.mintick)
+                int key = int(math.round(lp / stepK))
+                int zi = -1
+                int azN = array.size(azPrice)
+                if azN > 0
+                    for z = 0 to azN - 1
+                        if int(math.round(array.get(azPrice, z) / stepK)) == key
+                            zi := z
+                            break
+                if zi < 0
+                    array.push(azPrice, lp)
+                    array.push(azBid, bidAbs ? bidVol : 0.0)
+                    array.push(azOffer, offerAbs ? offerVol : 0.0)
+                else
+                    if bidAbs
+                        array.set(azBid, zi, array.get(azBid, zi) + bidVol)
+                    if offerAbs
+                        array.set(azOffer, zi, array.get(azOffer, zi) + offerVol)
 
 // ─── signal outputs ──────────────────────────────────────────────────────────
 bool sigBuy = false
@@ -751,7 +757,8 @@ if absorbZones and barstate.islast
         float half = math.max(atrV * 0.04, syminfo.mintick)
         int x0 = math.max(0, bar_index - 120)
         int x1 = bar_index + 8
-        for zi = 0 to array.size(azPrice) - 1
+        int azN = array.size(azPrice)
+        for zi = 0 to azN - 1
             float bv = array.get(azBid, zi)
             float ov = array.get(azOffer, zi)
             if bv + ov < minVol
