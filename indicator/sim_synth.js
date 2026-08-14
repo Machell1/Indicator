@@ -1823,6 +1823,288 @@ if (aln.length) {
   console.log('part22 edge profile:        px-only X, pinned, session-keyed, duTime-immune, additive OK');
 }
 
+// -- part 23: v13 absorption zones. Tracker semantics unit-tested with
+// controlled bars (creation, side/amount, merge, break, cap), then the
+// frame contract: dashed outline + amount label (opaque-safe), payload
+// published for the plotter with amount-scaled opacity multipliers,
+// plotter strips confined to the zone span, absZones=0 removes the
+// family, rowsPlot=0 keeps outline-only, pre-history zones surface via
+// the offscreen marker. --
+{
+  const inst = new Calc();
+  inst.props = { htfSessions: 20 };
+  inst.contractInfo = { tickSize: 0.1, product: 'GC' };
+  inst.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  inst.init();
+  inst.core.atr = 1.0;                       // controlled ATR for the unit test
+  let t23 = Date.parse('2026-08-03T01:00:00Z');
+  const mk23 = (o, c, h, l, vol, delta) => ({
+    tMs: (t23 += 60e3), o, c, h, l, vol, delta });
+  const feed = b => inst._absorbUpdate(b,
+    Math.max(0, (b.vol + b.delta) / 2), Math.max(0, (b.vol - b.delta) / 2));
+  // 40 baseline bars: median vol 100, median range 0.4 -- no zones
+  for (let j = 0; j < 40; j++) feed(mk23(100, 100.2, 100.4, 100.0, 100, 0));
+  check(inst.absZones.length === 0, 'part23: baseline bars created zones');
+  // GREEN absorption: 3x volume, compressed range, heavy SELL aggression
+  // (delta -200 -> bid 250), close ON the high (held) => demand zone,
+  // amount = bidVolume = 250
+  feed(mk23(100.1, 100.3, 100.3, 100.1, 300, -200));
+  check(inst.absZones.length === 1, 'part23: green zone not created');
+  const g23 = inst.absZones[0];
+  check(g23 && g23.side === 'G' && g23.amt === 250,
+    'part23: zone side/amount wrong: ' + JSON.stringify(g23));
+  // stacked second absorption at the same level MERGES (amount accumulates)
+  feed(mk23(100.1, 100.3, 100.35, 100.05, 320, -100));
+  check(inst.absZones.length === 1, 'part23: stacked zone did not merge');
+  check(inst.absZones[0].amt === 250 + 210 && inst.absZones[0].hits === 2,
+    'part23: merged amount wrong: ' + inst.absZones[0].amt);
+  // RED absorption far away: buyers absorbed (delta +200, close on the low)
+  feed(mk23(103.2, 103.0, 103.3, 103.0, 300, 200));
+  check(inst.absZones.length === 2 && inst.absZones[1].side === 'R' &&
+    inst.absZones[1].amt === 250,
+    'part23: red zone wrong: ' + JSON.stringify(inst.absZones[1]));
+  // a normal bar CLOSING through the green zone kills it (break rule);
+  // the red zone (far above) survives
+  const gLo = inst.absZones[0].pLo;
+  feed(mk23(100.1, gLo - 0.2, 100.2, gLo - 0.3, 100, 0));
+  check(inst.absZones.length === 1 && inst.absZones[0].side === 'R',
+    'part23: break rule failed (green zone should be dead)');
+  // ordinary bars never create zones even with directional delta
+  feed(mk23(100, 100.2, 100.4, 100.0, 110, -60));
+  check(inst.absZones.length === 1, 'part23: non-outlier bar created a zone');
+
+  // frame contract on a real run (rowsPlot defaults ON)
+  const R23 = runModel('A', 400, { htfSessions: 20 });
+  const i23 = R23.inst;
+  const L23 = i23.tmsList;
+  i23.absZones = [
+    { tms: L23[L23.length - 200], endTms: L23[L23.length - 150], side: 'G',
+      pLo: i23.lastOut.prev.poc - 0.6, pHi: i23.lastOut.prev.poc - 0.2,
+      amt: 4000, hits: 3 },
+    { tms: L23[L23.length - 90], endTms: L23[L23.length - 80], side: 'R',
+      pLo: i23.lastOut.prev.poc + 1.0, pHi: i23.lastOut.prev.poc + 1.3,
+      amt: 800, hits: 1 },
+  ];
+  const zt1 = i23.absZones[0].tms, zt2 = i23.absZones[1].tms;
+  const it23 = i23.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+  const box1 = it23.find(x => x.key === 'azB' + zt1);
+  const box2 = it23.find(x => x.key === 'azB' + zt2);
+  check(!!box1 && !!box2, 'part23: zone outlines missing');
+  if (box1) {
+    check(box1.lineStyle.color === '#00C853', 'part23: green zone color wrong');
+    for (const ln of box1.lines)
+      for (const p23 of [ln.a, ln.b])
+        check(p23.x.v <= (n - 1) + 2, 'part23: zone outline in the future grid');
+  }
+  if (box2) check(box2.lineStyle.color === '#FF5252', 'part23: red zone color wrong');
+  const lb1 = it23.find(x => x.key === 'azT' + zt1);
+  const lb2 = it23.find(x => x.key === 'azT' + zt2);
+  check(!!lb1 && lb1.text.indexOf('4.0K absorbed') >= 0,
+    'part23: amount label wrong: ' + (lb1 ? lb1.text : '-'));
+  check(!!lb2 && lb2.text.indexOf('800 absorbed') >= 0,
+    'part23: small amount label wrong: ' + (lb2 ? lb2.text : '-'));
+  // label font scales with absorbed strength (strong zone > weak zone)
+  check(lb1 && lb2 && lb1.style.fontSize > lb2.style.fontSize,
+    'part23: label font not scaled by amount');
+  // plotter payload: anchors resolved, opacity multipliers amount-scaled
+  const PZ = i23._plotZones;
+  check(!!PZ && PZ.length === 2, 'part23: zone payload missing');
+  if (PZ) {
+    const strong = PZ.find(z => z.color === '#00C853');
+    const weak = PZ.find(z => z.color === '#FF5252');
+    check(!!strong && !!weak && strong.opMul > weak.opMul,
+      'part23: opacity not scaled by absorbed amount');
+    check(Math.abs(strong.opMul - 1.0) < 1e-9,
+      'part23: strongest zone multiplier not 1.0: ' + strong.opMul);
+    for (const z of PZ)
+      check(z.opMul >= 0.35 - 1e-9 && z.opMul <= 1.0 + 1e-9 &&
+        z.anchor >= 0 && z.w >= 1 && z.pHi > z.pLo,
+        'part23: malformed zone payload: ' + JSON.stringify(z));
+  }
+  // plotter draws strips confined to each zone's span with scaled opacity
+  const fn23 = (mod.plotter || []).find(pl => pl && pl.type === 'custom').fn;
+  const draws23 = [];
+  fn23({ drawLine: (a, b, s) => draws23.push({ a, b, s }) },
+    { props: {}, _plotZones: PZ },
+    { data: { length: n }, get: j => ({ __x: j }) });
+  check(draws23.length > 0, 'part23: plotter drew no zone strips');
+  for (const dr of draws23) {
+    const z = PZ.find(zz => dr.a.y === zz.pLo && dr.b.y === zz.pHi);
+    check(!!z, 'part23: strip not matching any zone span');
+    if (z) {
+      check(dr.a.x >= z.anchor && dr.a.x <= z.anchor + z.w,
+        'part23: strip outside the zone span');
+      check(Math.abs(dr.s.opacity - Math.min(1, 0.30 * z.opMul)) < 1e-9 ||
+        dr.s.opacity >= 0.01,
+        'part23: strip opacity out of policy: ' + dr.s.opacity);
+      check(dr.s.color === z.color, 'part23: strip color mismatch');
+    }
+  }
+  // absZones='0' removes the whole family (string prop)
+  i23.props = Object.assign({}, i23.props, { absZones: '0' });
+  const it23b = i23.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+  check(it23b.every(x => !x.key.startsWith('az')),
+    'part23: zones drawn despite absZones=0');
+  check(!i23._plotZones, 'part23: payload published despite absZones=0');
+  // rowsPlot=0: outline + label stay (opaque-safe), no fill payload
+  i23.props = Object.assign({}, i23.props, { absZones: '1', rowsPlot: '0' });
+  const it23c = i23.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+  check(it23c.some(x => x.key === 'azB' + zt1) &&
+    it23c.some(x => x.key === 'azT' + zt1),
+    'part23: outline/label missing in rowsPlot=0 mode');
+  check(!i23._plotZones, 'part23: fill payload published in rowsPlot=0 mode');
+  // pre-history zone: no items, offscreen marker
+  i23.props = Object.assign({}, i23.props, { rowsPlot: '1' });
+  i23.absZones = [{ tms: L23[0] - 3600e3, endTms: L23[0] - 3500e3, side: 'G',
+    pLo: 100, pHi: 101, amt: 500, hits: 1 }];
+  const it23d = i23.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+  check(it23d.every(x => !x.key.startsWith('az')),
+    'part23: pre-history zone drawn');
+  const s323 = it23d.find(x => x.key === 'stat3');
+  check(s323 && s323.text.indexOf('[old anchors offscreen') >= 0,
+    'part23: offscreen marker missing for pre-history zone');
+  console.log('part23 absorption zones:    tracker, merge, break, labels, payload, plotter OK');
+}
+
+// -- part 24: v13 session window. The core's inNyWindow must wrap
+// midnight (the Asian-session case), the wrapper must deliver the props
+// (worst-case strings) into core cfg with the ASIA default, and the
+// banner must always disclose the active window -- non-playbook windows
+// marked ungraded. --
+{
+  const { inNyWindow } = require('./dale_core.js');
+  // August = EDT (UTC-4). Asia window 18 -> 3 NY:
+  const asia = { nyStartHour: 18, nyEndHour: 3 };
+  check(inNyWindow(Date.parse('2026-08-04T23:00:00Z'), asia) === true,
+    'part24: 19:00 NY not inside the 18-03 window');
+  check(inNyWindow(Date.parse('2026-08-05T06:00:00Z'), asia) === true,
+    'part24: 02:00 NY not inside the 18-03 window');
+  check(inNyWindow(Date.parse('2026-08-05T08:00:00Z'), asia) === false,
+    'part24: 04:00 NY leaked into the 18-03 window');
+  check(inNyWindow(Date.parse('2026-08-05T14:00:00Z'), asia) === false,
+    'part24: 10:00 NY leaked into the 18-03 window');
+  // classic daytime window unchanged (the graded discipline)
+  const ny = { nyStartHour: 9, nyEndHour: 11 };
+  check(inNyWindow(Date.parse('2026-08-05T14:00:00Z'), ny) === true,
+    'part24: 10:00 NY not inside 09-11');
+  check(inNyWindow(Date.parse('2026-08-05T18:00:00Z'), ny) === false,
+    'part24: 14:00 NY leaked into 09-11');
+  // degenerate equal edges = always-on
+  check(inNyWindow(Date.parse('2026-08-05T18:00:00Z'),
+    { nyStartHour: 0, nyEndHour: 0 }) === true,
+    'part24: equal-edges window not always-on');
+  // wrapper wiring: string props reach core cfg; defaults are ASIA 18/3;
+  // midnight (0) is a legal edge; garbage falls back to the default
+  const w24 = new Calc();
+  w24.contractInfo = { tickSize: 0.1 };
+  w24.chartDescription = { underlyingType: 'MinuteBar', elementSize: 1 };
+  w24.props = { winStart: '20', winEnd: '2' };
+  w24.init();
+  check(w24.core.cfg.nyStartHour === 20 && w24.core.cfg.nyEndHour === 2,
+    'part24: string window props not delivered to core cfg');
+  w24.props = { winStart: '21', winEnd: '0' };
+  w24.init();
+  check(w24.core.cfg.nyEndHour === 0, 'part24: midnight edge rejected');
+  w24.props = { winStart: 'garbage', winEnd: '99' };
+  w24.init();
+  check(w24.core.cfg.nyStartHour === 18 && w24.core.cfg.nyEndHour === 3,
+    'part24: garbage window props did not fall back to the ASIA default');
+  w24.props = {};
+  w24.init();
+  check(w24.core.cfg.nyStartHour === 18 && w24.core.cfg.nyEndHour === 3,
+    'part24: default window is not the Asian session');
+  // banner disclosure: default run says ASIA + ungraded; 9-11 says playbook
+  const s324 = items.find(x => x.key === 'stat3');
+  check(s324 && s324.text.indexOf('win 18-03 NY (ASIA) [window ungraded]') >= 0,
+    'part24: ASIA window disclosure missing: ' + (s324 ? s324.text : '-'));
+  const R24 = runModel('A', 400, { htfSessions: 20, winStart: 9, winEnd: 11,
+    rowsPlot: '0' });
+  const s324b = R24.lastResult.graphics.items.find(x => x.key === 'stat3');
+  check(s324b && s324b.text.indexOf('win 09-11 NY (playbook)') >= 0 &&
+    s324b.text.indexOf('[window ungraded]') < 0,
+    'part24: playbook window not recognized: ' + (s324b ? s324b.text : '-'));
+  console.log('part24 session window:      wrap logic, prop wiring, ASIA default, disclosure OK');
+}
+
+// -- part 25: v13 Rapid Daily risk line. The banner must carry the
+// account's REAL rule card (DLL soft / EOD trail hard / buffer / caps),
+// per-signal sizing must respect risk$, tick value and the account's
+// contract cap, micro products cap at the micro limit, and unknown
+// products disclose instead of guessing. --
+{
+  // default: GC (mini, $10/tick), 50K -> DLL $1000, trail $2000,
+  // buffer $2100, auto risk 25% of DLL = $250, cap 4 minis
+  const sR = items.find(x => x.key === 'statR');
+  check(!!sR, 'part25: risk line missing');
+  if (sR) {
+    for (const wantTxt of ['RAPID DAILY 50K', 'DLL $1000 soft',
+      'EOD trail $2000 hard', 'buffer $2100', 'risk $250/trade, max 2/day',
+      'cap 4 mini', '\u03A3\u0394 '])
+      check(sR.text.indexOf(wantTxt) >= 0,
+        'part25: risk line missing "' + wantTxt + '": ' + sR.text);
+  }
+  // live-signal sizing: SL 5 ticks on GC at $250 risk -> floor(250/50)=5,
+  // capped at 4 minis; the SL label and the risk line both carry it
+  const i25 = A.inst;
+  const poc25 = i25.lastOut.prev.poc;
+  const sigT25 = i25.tmsList[i25.tmsList.length - 30];
+  i25.marks.push({ tMs: sigT25, price: poc25, day: i25.lastOut.day,
+    ev: { kind: 'prior-poc', tMs: sigT25, day: i25.lastOut.day, long: true,
+      entry: poc25, sl: poc25 - 0.5, tp: poc25 + 1.0, level: poc25,
+      tag: '[stack tested +0.40R/80% n10]', htf: '' } });
+  const it25 = i25.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+  const sl25 = it25.find(x => x.key === 'slT');
+  check(!!sl25 && sl25.text.indexOf('5t = 4 mini') >= 0,
+    'part25: SL sizing wrong: ' + (sl25 ? sl25.text : '-'));
+  const sR25 = it25.find(x => x.key === 'statR');
+  check(!!sR25 && sR25.text.indexOf('live SL 5t = 4') >= 0,
+    'part25: live sizing missing from the risk line: ' + (sR25 ? sR25.text : '-'));
+  const sg25 = it25.find(x => x.key === 'sg' + sigT25);
+  check(!!sg25 && sg25.text.indexOf('~4 mini') >= 0,
+    'part25: signal label missing the size hint: ' + (sg25 ? sg25.text : '-'));
+  i25.marks.pop();
+  // account preset + explicit risk (string props), micro product: MGC
+  // $1/tick, 100K -> DLL $1250, cap 60 micros; $120 risk, 10t SL ->
+  // floor(120/10)=12 micros
+  const R25 = runModel('A', 400, { htfSessions: 20, acctSize: '100',
+    riskPerTrade: '120', rowsPlot: '0' });
+  const j25 = R25.inst;
+  j25.contractInfo = { tickSize: 0.1, product: 'MGC' };
+  const pocJ = j25.lastOut.prev.poc;
+  const sigTJ = j25.tmsList[j25.tmsList.length - 30];
+  j25.marks.push({ tMs: sigTJ, price: pocJ, day: j25.lastOut.day,
+    ev: { kind: 'accum', tMs: sigTJ, day: j25.lastOut.day, long: true,
+      entry: pocJ, sl: pocJ - 1.0, tp: pocJ + 1.0, level: pocJ,
+      tag: '[tested +0.28R/75% n12]', htf: '' } });
+  const itJ = j25.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+  const sRJ = itJ.find(x => x.key === 'statR');
+  check(!!sRJ && sRJ.text.indexOf('RAPID DAILY 100K') >= 0 &&
+    sRJ.text.indexOf('DLL $1250 soft') >= 0 &&
+    sRJ.text.indexOf('risk $120/trade') >= 0 &&
+    sRJ.text.indexOf('cap 60 micro') >= 0,
+    'part25: 100K/micro rule card wrong: ' + (sRJ ? sRJ.text : '-'));
+  const slJ = itJ.find(x => x.key === 'slT');
+  check(!!slJ && slJ.text.indexOf('10t = 12 micro') >= 0,
+    'part25: micro sizing wrong: ' + (slJ ? slJ.text : '-'));
+  // unknown product without tickVal: sizing withheld + disclosed
+  j25.contractInfo = { tickSize: 0.25, product: 'ZZ' };
+  const itU = j25.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+  const s3U = itU.find(x => x.key === 'stat3');
+  check(s3U && s3U.text.indexOf('tickVal unknown (ZZ)') >= 0,
+    'part25: unknown tick value not disclosed');
+  const slU = itU.find(x => x.key === 'slT');
+  check(!!slU && slU.text.indexOf('t = ') < 0,
+    'part25: sizing printed without a tick value: ' + (slU ? slU.text : '-'));
+  // tickVal override enables sizing on the unknown product
+  j25.props = Object.assign({}, j25.props, { tickVal: '5' });
+  const itV = j25.buildItems(entity(bars[n - 1], true, true), n - 1, null);
+  const slV = itV.find(x => x.key === 'slT');
+  check(!!slV && /\d+t = \d+/.test(slV.text),
+    'part25: tickVal override did not enable sizing');
+  j25.marks.pop();
+  console.log('part25 rapid daily risk:    rule card, sizing, caps, micro, disclosure OK');
+}
+
 const kindsOf = c => {
   const k = {};
   for (const e of c.events) k[e.kind] = (k[e.kind] || 0) + 1;
