@@ -9,11 +9,15 @@
 // ============================================================================
 
 indicator("TraderMachell — Dale Volume-Profile Model", "TraderMachell", overlay = true,
-     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 900)
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ─── inputs ───────────────────────────────────────────────────────────────
 gM = "Mode"
 cleanSignals = input.bool(true, "Clean signal chart (hide research UI)", group = gM)
+visualDensity = input.string("Balanced", "Visual density",
+     options = ["Minimal", "Balanced", "Detailed"], group = gM)
+showLevelLabels = input.bool(true, "Right-edge level labels", group = gM)
+showBubbleText = input.bool(false, "Text beside absorption bubbles", group = gM)
 showLevels     = input.bool(true, "Prior POC / VAH / VAL lines", group = gM)
 tradeZones     = input.bool(true, "Risk / reward zone shading", group = gM)
 zoneOpacity    = input.int(18, "Zone opacity %", minval = 1, maxval = 80, group = gM)
@@ -71,23 +75,26 @@ priorDays   = input.int(10, "Prior POCs for targets", minval = 1, maxval = 30, g
 tpFrontATR  = input.float(0.15, "Target front-run (ATR)", step = 0.05, group = gSig)
 
 gV = "Colors"
-cPoc  = input.color(#F0B429, "Prior POC", group = gV)
-cVa   = input.color(#7C93A8, "Prior VA", group = gV)
-cDev  = input.color(#2DA88F, "Developing", group = gV)
-cNak  = input.color(#9B7ED8, "Naked POC", group = gV)
-cAcc  = input.color(#4FA3D1, "ACCUM", group = gV)
-cBuy  = input.color(#26A17B, "BUY", group = gV)
-cSell = input.color(#E05260, "SELL", group = gV)
-cSl   = input.color(#7A6060, "Stop", group = gV)
-cTp   = input.color(#26A17B, "Target", group = gV)
-cBidAbs = input.color(#26A17B, "Bid absorption", group = gV)
-cAskAbs = input.color(#E05260, "Offer absorption", group = gV)
+cPoc  = input.color(#F5B942, "Prior POC", group = gV)
+cVa   = input.color(#64748B, "Prior VA", group = gV)
+cDev  = input.color(#22B8A7, "Developing", group = gV)
+cNak  = input.color(#A78BFA, "Naked POC", group = gV)
+cAcc  = input.color(#60A5FA, "ACCUM", group = gV)
+cBuy  = input.color(#10B981, "BUY", group = gV)
+cSell = input.color(#F05252, "SELL", group = gV)
+cSl   = input.color(#F87171, "Stop", group = gV)
+cTp   = input.color(#34D399, "Target", group = gV)
+cBidAbs = input.color(#34D399, "Bid absorption", group = gV)
+cAskAbs = input.color(#FB7185, "Offer absorption", group = gV)
 
 // Pine reserved — never use as names: by, to, in, and, or, not, if, for, while,
 // break, continue, switch, var, const, export, import, type, enum, matrix, range, text.
 vaPct = vaIn / 100.0
 barMin = math.max(1, timeframe.in_seconds() / 60)
 showTbl = not cleanSignals
+isMinimal = visualDensity == "Minimal"
+isDetailed = visualDensity == "Detailed"
+levelTagBg = #111827
 
 // ─── delta (intrabar when available) ──────────────────────────────────────
 lowTf = timeframe.period == "1" ? "1S" : "1"
@@ -850,11 +857,13 @@ else if P_armed
 // ─── level plots ───────────────────────────────────────────────────────────
 bool showLvl = showLevels or not cleanSignals
 plot(showLvl and showPrev ? pPoc : na, "PREV POC", cPoc, 2, plot.style_linebr)
-plot(showLvl and showPrev ? pVah : na, "PREV VAH", cVa, 1, plot.style_linebr)
-plot(showLvl and showPrev ? pVal : na, "PREV VAL", cVa, 1, plot.style_linebr)
-plot(showDevLines ? dPoc : na, "DEV POC", cDev, 1, plot.style_dashed)
-plot(showDevLines ? dVah : na, "DEV VAH", color.new(cDev, 40), 1, plot.style_dashed)
-plot(showDevLines ? dVal : na, "DEV VAL", color.new(cDev, 40), 1, plot.style_dashed)
+plot(showLvl and showPrev and not isMinimal ? pVah : na, "PREV VAH", color.new(cVa, 15), 1, plot.style_linebr)
+plot(showLvl and showPrev and not isMinimal ? pVal : na, "PREV VAL", color.new(cVa, 15), 1, plot.style_linebr)
+// plot() has no dashed style in Pine. Dashed developing structure is drawn
+// below with line objects; these plots provide stable, subtle live levels.
+plot(showDevLines ? dPoc : na, "DEV POC", color.new(cDev, 10), 1, plot.style_linebr)
+plot(showDevLines and not isMinimal ? dVah : na, "DEV VAH", color.new(cDev, 55), 1, plot.style_linebr)
+plot(showDevLines and not isMinimal ? dVal : na, "DEV VAL", color.new(cDev, 55), 1, plot.style_linebr)
 plot(useAccum ? accLvl : na, "ACCUM POC", cAcc, 2, plot.style_linebr)
 
 // ─── SVP histogram + VA layers (CantoLab / F3s-style layout) ───────────────
@@ -884,16 +893,16 @@ if barstate.islast
     int devSpan = math.min(histMaxW, math.max(1, devX1 - devX0))
 
     // Prior VA zone extending into current session (jmosullivan convention)
-    if showPrevVA and not na(pVah) and not na(pVal) and devX1 > devX0
+    if showPrevVA and not isMinimal and not na(pVah) and not na(pVal) and devX1 > devX0
         array.push(histBoxes, box.new(devX0, pVah, devX1, pVal,
              border_width = 0, bgcolor = color.new(cVa, 100 - vaFillOp)))
-        f_pushBracket(histLines, devX0, devX1, pVah, pVal, color.new(cVa, 30))
+        f_pushBracket(histLines, devX0, devX1, pVah, pVal, color.new(cVa, 55))
 
     // Developing VA fill + bracket in session box
-    if showDevVA and not na(dVah) and not na(dVal) and devSpan > 5
+    if showDevVA and not isMinimal and not na(dVah) and not na(dVal) and devSpan > 5
         array.push(histBoxes, box.new(devX0, dVah, devX1, dVal,
              border_width = 0, bgcolor = color.new(cDev, 100 - vaFillOp - 4)))
-        f_pushBracket(histLines, devX0, devX0 + devSpan, dVah, dVal, color.new(cDev, 35))
+        f_pushBracket(histLines, devX0, devX0 + devSpan, dVah, dVal, color.new(cDev, 55))
 
     // Prior session histogram (finalized session box, Blue→Red ramp)
     if showPrevHist and array.size(savedBins) > 0 and not na(savedGrid) and not na(savedStep)
@@ -904,13 +913,14 @@ if barstate.islast
                  savedPoc, savedVah, savedVal, true, 22, array.new_float())
             array.push(histLines, line.new(px0, savedPoc, px1, savedPoc,
                  color = cov >= 0.8 ? #FFFF00 : #FFFFFF, width = cov >= 0.8 ? 3 : 1))
-            int plx = px1 + 2
-            array.push(histLabels, label.new(plx, savedVah, "PREV VAH " + str.tostring(savedVah, format.mintick),
-                 style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny))
-            array.push(histLabels, label.new(plx, savedPoc, "PREV POC " + str.tostring(savedPoc, format.mintick),
-                 style = label.style_label_left, color = color.new(cPoc, 20), textcolor = cPoc, size = size.tiny))
-            array.push(histLabels, label.new(plx, savedVal, "PREV VAL " + str.tostring(savedVal, format.mintick),
-                 style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny))
+            if isDetailed
+                int plx = px1 + 2
+                array.push(histLabels, label.new(plx, savedVah, "VAH  " + str.tostring(savedVah, format.mintick),
+                     style = label.style_label_left, color = levelTagBg, textcolor = cVa, size = size.tiny))
+                array.push(histLabels, label.new(plx, savedPoc, "POC  " + str.tostring(savedPoc, format.mintick),
+                     style = label.style_label_left, color = levelTagBg, textcolor = cPoc, size = size.tiny))
+                array.push(histLabels, label.new(plx, savedVal, "VAL  " + str.tostring(savedVal, format.mintick),
+                     style = label.style_label_left, color = levelTagBg, textcolor = cVa, size = size.tiny))
 
     // Developing session histogram (live SVP box)
     if showDevHist and array.size(devBins) > 0 and not na(devGrid) and not na(devStep) and devSpan > 5
@@ -919,13 +929,14 @@ if barstate.islast
              dPoc, dVah, dVal, true, 28, devTimes)
         array.push(histLines, line.new(devX0, dPoc, devX0 + devSpan, dPoc,
              color = dcov >= 0.8 ? color.new(cDev, 0) : cDev, width = dcov >= 0.8 ? 3 : 1, style = line.style_dashed))
-        int dlx = devX0 + devSpan + 2
-        array.push(histLabels, label.new(dlx, dVah, "DEV VAH " + str.tostring(dVah, format.mintick),
-             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny))
-        array.push(histLabels, label.new(dlx, dPoc, "DEV POC " + str.tostring(dPoc, format.mintick),
-             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny))
-        array.push(histLabels, label.new(dlx, dVal, "DEV VAL " + str.tostring(dVal, format.mintick),
-             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny))
+        if isDetailed
+            int dlx = devX0 + devSpan + 2
+            array.push(histLabels, label.new(dlx, dVah, "dVAH  " + str.tostring(dVah, format.mintick),
+                 style = label.style_label_left, color = levelTagBg, textcolor = color.new(cDev, 15), size = size.tiny))
+            array.push(histLabels, label.new(dlx, dPoc, "dPOC  " + str.tostring(dPoc, format.mintick),
+                 style = label.style_label_left, color = levelTagBg, textcolor = cDev, size = size.tiny))
+            array.push(histLabels, label.new(dlx, dVal, "dVAL  " + str.tostring(dVal, format.mintick),
+                 style = label.style_label_left, color = levelTagBg, textcolor = color.new(cDev, 15), size = size.tiny))
 
     // ACCUM rotation box + flexible profile histogram
     if showAccumBox and not na(accLvl) and array.size(accBins) > 0 and not na(accGrid) and not na(accBar)
@@ -935,8 +946,8 @@ if barstate.islast
             int ax1 = accBar + 4
             array.push(accumBoxes, box.new(ax0, accVah, ax1, accVal,
                  border_width = 1, border_color = color.new(cAcc, 50), bgcolor = color.new(cAcc, 92)))
-            array.push(histLabels, label.new(ax1 + 2, accLvl, "ACCUM POC " + str.tostring(accLvl, format.mintick),
-                 style = label.style_label_left, color = color.new(cAcc, 20), textcolor = cAcc, size = size.tiny))
+            array.push(histLabels, label.new(ax1 + 2, accLvl, "ACCUM  " + str.tostring(accLvl, format.mintick),
+                 style = label.style_label_left, color = levelTagBg, textcolor = cAcc, size = size.tiny))
             int abN = array.size(accBins)
             if abN > 0
                 for k = 0 to abN - 1
@@ -958,10 +969,12 @@ if barstate.islast
             float bblPx = array.get(bblY, bi)
             string bt = array.get(bblTxt, bi)
             array.push(bblLabels, label.new(bx, bblPx, "\u25CF", style = label.style_none,
-                 textcolor = bc, size = size.large))
-            array.push(bblLabels, label.new(bx, bblPx, bt,
-                 style = isBuy ? label.style_label_up : label.style_label_down,
-                 color = color.new(bc, 25), textcolor = #FFFFFF, size = size.tiny))
+                 textcolor = color.new(bc, 5), size = isDetailed ? size.large : size.normal,
+                 tooltip = bt + "  " + str.tostring(bblPx, format.mintick)))
+            if showBubbleText and not isMinimal
+                array.push(bblLabels, label.new(bx, bblPx, isBuy ? "BID ABS" : "ASK ABS",
+                     style = isBuy ? label.style_label_up : label.style_label_down,
+                     color = levelTagBg, textcolor = bc, size = size.tiny))
 
     // Delta imbalance orderflow markers
     int oN = array.size(ofX)
@@ -969,9 +982,10 @@ if barstate.islast
         for oi = 0 to oN - 1
             bool dn = array.get(ofDn, oi)
             color oc = dn ? cSell : cBuy
-            string ot = dn ? "OF \u25BC" : "OF \u25B2"
+            string ot = dn ? "\u25BC" : "\u25B2"
             array.push(ofLabels, label.new(array.get(ofX, oi), array.get(ofY, oi), ot,
-                 style = label.style_none, textcolor = oc, size = size.small))
+                 style = label.style_none, textcolor = color.new(oc, 25), size = size.tiny,
+                 tooltip = dn ? "Strong negative delta" : "Strong positive delta"))
 
 // ─── signal graphics ─────────────────────────────────────────────────────────
 var array<line> sigLines = array.new<line>()
@@ -1004,21 +1018,23 @@ if barstate.islast
     lblDPoc := na
     lblDVah := na
     lblDVal := na
-    int lx = bar_index + 12
-    if showLvl and showPrev and not na(pPoc)
+    int lx = bar_index + 10
+    if showLevelLabels and showLvl and showPrev and not na(pPoc)
         lblPoc := label.new(lx, pPoc, "PREV POC  " + str.tostring(pPoc, format.mintick),
-             style = label.style_label_left, color = color.new(cPoc, 20), textcolor = cPoc, size = size.tiny)
-        lblVah := label.new(lx, pVah, "PREV VAH  " + str.tostring(pVah, format.mintick),
-             style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny)
-        lblVal := label.new(lx, pVal, "PREV VAL  " + str.tostring(pVal, format.mintick),
-             style = label.style_label_left, color = color.new(cVa, 20), textcolor = cVa, size = size.tiny)
-    if showDevLines and not na(dPoc)
+             style = label.style_label_left, color = levelTagBg, textcolor = cPoc, size = size.small)
+        if not isMinimal
+            lblVah := label.new(lx, pVah, "PREV VAH  " + str.tostring(pVah, format.mintick),
+                 style = label.style_label_left, color = levelTagBg, textcolor = cVa, size = size.tiny)
+            lblVal := label.new(lx, pVal, "PREV VAL  " + str.tostring(pVal, format.mintick),
+                 style = label.style_label_left, color = levelTagBg, textcolor = cVa, size = size.tiny)
+    if showLevelLabels and showDevLines and not na(dPoc)
         lblDPoc := label.new(lx, dPoc, "DEV POC  " + str.tostring(dPoc, format.mintick),
-             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny)
-        lblDVah := label.new(lx, dVah, "DEV VAH  " + str.tostring(dVah, format.mintick),
-             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny)
-        lblDVal := label.new(lx, dVal, "DEV VAL  " + str.tostring(dVal, format.mintick),
-             style = label.style_label_left, color = color.new(cDev, 20), textcolor = cDev, size = size.tiny)
+             style = label.style_label_left, color = levelTagBg, textcolor = cDev, size = size.small)
+        if isDetailed
+            lblDVah := label.new(lx, dVah, "DEV VAH  " + str.tostring(dVah, format.mintick),
+                 style = label.style_label_left, color = levelTagBg, textcolor = color.new(cDev, 20), size = size.tiny)
+            lblDVal := label.new(lx, dVal, "DEV VAL  " + str.tostring(dVal, format.mintick),
+                 style = label.style_label_left, color = levelTagBg, textcolor = color.new(cDev, 20), size = size.tiny)
 
 if sigBuy or sigSell
     color sigCol = sigBuy ? cBuy : cSell
@@ -1042,17 +1058,17 @@ if sigBuy or sigSell
          style = label.style_none, color = na, textcolor = sigCol, size = size.large))
     array.push(sigLabels, label.new(x0, ePx, sigSide + "  " + eKind + " SETUP",
          style = sigBuy ? label.style_label_up : label.style_label_down,
-         color = color.new(sigCol, 15), textcolor = #FFFFFF, size = size.normal))
+         color = sigCol, textcolor = #FFFFFF, size = size.normal))
     array.push(sigLabels, label.new(x1, ePx, entryOrd + "  ENTRY  " + str.tostring(ePx, format.mintick),
-         style = label.style_label_left, color = color.new(sigCol, 20), textcolor = sigCol, size = size.small))
+         style = label.style_label_left, color = levelTagBg, textcolor = sigCol, size = size.small))
     array.push(sigLabels, label.new(x1, eSl, slOrd + "  SL  " + str.tostring(eSl, format.mintick),
-         style = label.style_label_left, color = color.new(cSl, 20), textcolor = cSl, size = size.small))
+         style = label.style_label_left, color = levelTagBg, textcolor = cSl, size = size.small))
     array.push(sigLabels, label.new(x1, eTp, tpOrd + "  TP  " + str.tostring(eTp, format.mintick),
-         style = label.style_label_left, color = color.new(cTp, 20), textcolor = cTp, size = size.small))
-    if risk > 0
+         style = label.style_label_left, color = levelTagBg, textcolor = cTp, size = size.small))
+    if risk > 0 and isDetailed
         array.push(sigLabels, label.new(x1, (ePx + eTp) / 2,
              "R " + str.tostring(risk, format.mintick) + "  to TP " + str.tostring(toTp, format.mintick),
-             style = label.style_label_left, color = color.new(#78909C, 20), textcolor = #78909C, size = size.tiny))
+             style = label.style_label_left, color = levelTagBg, textcolor = #94A3B8, size = size.tiny))
     while array.size(sigLines) > 400
         line.delete(array.shift(sigLines))
     while array.size(sigBoxes) > 200
