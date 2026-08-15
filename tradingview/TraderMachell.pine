@@ -97,7 +97,12 @@ isDetailed = visualDensity == "Detailed"
 levelTagBg = #111827
 
 // ─── delta (intrabar when available) ──────────────────────────────────────
-lowTf = timeframe.period == "1" ? "1S" : "1"
+// "1S" needs a TradingView plan with seconds data; on plans without it the
+// request errors out, so it is opt-in. Charts below 1m must use "1S" anyway
+// (a lower TF can never be above the chart TF).
+useSecIntra = input.bool(true, "1-second intrabars on 1m charts", group = gOF,
+     tooltip = "Turn off if your TradingView plan has no seconds data and the script errors on load")
+lowTf = timeframe.in_seconds() < 60 ? "1S" : timeframe.period == "1" ? (useSecIntra ? "1S" : "1") : "1"
 [lV, lO, lC] = request.security_lower_tf(syminfo.tickerid, lowTf, [volume, open, close])
 
 f_delta() =>
@@ -888,7 +893,10 @@ if barstate.islast
     while array.size(accumBoxes) > 0
         box.delete(array.pop(accumBoxes))
 
-    int devX0 = sessStartBar
+    // Pine rejects drawings anchored more than ~9,999 bars back; clamp all
+    // left anchors into the safe window
+    int minX = math.max(0, bar_index - 4500)
+    int devX0 = math.max(sessStartBar, minX)
     int devX1 = bar_index
     int devSpan = math.min(histMaxW, math.max(1, devX1 - devX0))
 
@@ -906,7 +914,7 @@ if barstate.islast
 
     // Prior session histogram (finalized session box, Blue→Red ramp)
     if showPrevHist and array.size(savedBins) > 0 and not na(savedGrid) and not na(savedStep)
-        int px0 = lastSessStartBar
+        int px0 = math.max(lastSessStartBar, minX)
         int px1 = na(lastSessEndBar) ? px0 + devSpan : math.min(px0 + histMaxW, lastSessEndBar)
         if px1 > px0
             float cov = f_pushHistogram(histBoxes, px0, px1, savedGrid, savedStep, savedBins,
@@ -942,7 +950,7 @@ if barstate.islast
     if showAccumBox and not na(accLvl) and array.size(accBins) > 0 and not na(accGrid) and not na(accBar)
         float mxA = array.max(accBins)
         if mxA > 0
-            int ax0 = math.max(accBar - flexW, bar_index - 300)
+            int ax0 = math.max(math.max(accBar - flexW, bar_index - 300), minX)
             int ax1 = accBar + 4
             array.push(accumBoxes, box.new(ax0, accVah, ax1, accVal,
                  border_width = 1, border_color = color.new(cAcc, 50), bgcolor = color.new(cAcc, 92)))
@@ -963,9 +971,11 @@ if barstate.islast
     int bN = array.size(bblX)
     if showBubbles and bN > 0
         for bi = 0 to bN - 1
+            int bx = array.get(bblX, bi)
+            if bx < minX
+                continue
             bool isBuy = array.get(bblBuy, bi)
             color bc = isBuy ? cBidAbs : cAskAbs
-            int bx = array.get(bblX, bi)
             float bblPx = array.get(bblY, bi)
             string bt = array.get(bblTxt, bi)
             array.push(bblLabels, label.new(bx, bblPx, "\u25CF", style = label.style_none,
@@ -980,10 +990,13 @@ if barstate.islast
     int oN = array.size(ofX)
     if showOFMarks and oN > 0
         for oi = 0 to oN - 1
+            int ox = array.get(ofX, oi)
+            if ox < minX
+                continue
             bool dn = array.get(ofDn, oi)
             color oc = dn ? cSell : cBuy
             string ot = dn ? "\u25BC" : "\u25B2"
-            array.push(ofLabels, label.new(array.get(ofX, oi), array.get(ofY, oi), ot,
+            array.push(ofLabels, label.new(ox, array.get(ofY, oi), ot,
                  style = label.style_none, textcolor = color.new(oc, 25), size = size.tiny,
                  tooltip = dn ? "Strong negative delta" : "Strong positive delta"))
 
@@ -991,6 +1004,7 @@ if barstate.islast
 var array<line> sigLines = array.new<line>()
 var array<box> sigBoxes = array.new<box>()
 var array<label> sigLabels = array.new<label>()
+var int lastSigLabels = 0
 
 var label lblPoc = na
 var label lblVah = na
@@ -1065,10 +1079,12 @@ if sigBuy or sigSell
          style = label.style_label_left, color = levelTagBg, textcolor = cSl, size = size.small))
     array.push(sigLabels, label.new(x1, eTp, tpOrd + "  TP  " + str.tostring(eTp, format.mintick),
          style = label.style_label_left, color = levelTagBg, textcolor = cTp, size = size.small))
+    lastSigLabels := 5
     if risk > 0 and isDetailed
         array.push(sigLabels, label.new(x1, (ePx + eTp) / 2,
              "R " + str.tostring(risk, format.mintick) + "  to TP " + str.tostring(toTp, format.mintick),
              style = label.style_label_left, color = levelTagBg, textcolor = #94A3B8, size = size.tiny))
+        lastSigLabels := 6
     while array.size(sigLines) > 400
         line.delete(array.shift(sigLines))
     while array.size(sigBoxes) > 200
@@ -1089,8 +1105,9 @@ if barstate.islast and not na(eBar)
         box.set_right(array.get(sigBoxes, nb - 2), x1)
         box.set_right(array.get(sigBoxes, nb - 1), x1)
     int nlab = array.size(sigLabels)
-    // last signal block: arrow, setup, entry, sl, tp, [rr] = up to 6 labels
-    int block = math.min(6, nlab)
+    // move only the last signal's right-edge labels (entry/sl/tp[/rr]); the
+    // exact per-signal label count is recorded when the signal fires
+    int block = math.min(lastSigLabels, nlab)
     if block > 0
         for li = 0 to block - 1
             label lbl = array.get(sigLabels, nlab - block + li)
