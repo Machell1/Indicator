@@ -83,7 +83,12 @@ cTp   = input.color(#26A17B, "Target", group = gV)
 cBidAbs = input.color(#26A17B, "Bid absorption", group = gV)
 cAskAbs = input.color(#E05260, "Offer absorption", group = gV)
 
-vaPct = vaIn / 100.0
+// Pine reserved keywords — never use as variable names: by, to, in, and, or, not, if,
+// for, while, break, continue, switch, var, const, export, import, type, enum, matrix.
+
+// Guard empty-array loops (Pine runs `for i = 0 to -1` once).
+f_loopEnd(int n) =>
+    math.max(n - 1, -1)
 barMin = math.max(1, timeframe.in_seconds() / 60)
 showTbl = not cleanSignals
 
@@ -96,7 +101,7 @@ f_delta() =>
     bool real = false
     if array.size(lV) > 0
         real := true
-        for i = 0 to array.size(lV) - 1
+        for i = 0 to f_loopEnd(array.size(lV))
             float v = array.get(lV, i)
             float o = array.get(lO, i)
             float c = array.get(lC, i)
@@ -388,8 +393,10 @@ if newSess and array.size(sL) > 5
         while array.size(priorPocs) > 50
             array.shift(priorPocs)
         float sessVol = 0.0
-        for i = 0 to array.size(sV) - 1
-            sessVol += array.get(sV, i)
+        int svN = array.size(sV)
+        if svN > 0
+            for i = 0 to svN - 1
+                sessVol += array.get(sV, i)
         prevLiquid := sessVol >= LIQ_MIN_VOL and array.size(sV) >= math.round(LIQ_MIN_BARS / barMin)
     array.clear(sH)
     array.clear(sL)
@@ -593,58 +600,58 @@ if not na(atrV) and atrV > 0 and bar_index > rotBars + 5 and barstate.isconfirme
 // Track absorption at levels
 if not na(atrV) and atrV > 0 and array.size(sV) >= 5
     int sw = math.min(SIG_WIN, array.size(sV))
-    array<float> wV = array.new_float()
-    array<float> wR = array.new_float()
-    for i = 0 to sw - 1
-        array.push(wV, array.get(sV, array.size(sV) - 1 - i))
-        array.push(wR, array.get(sR, array.size(sR) - 1 - i))
-    float vmed = f_median(wV)
-    float rmed = f_median(wR)
-    if vmed > 0 and rmed > 0
-        float bidVol = math.max(0, (volume - dlt) / 2.0)
-        float offerVol = math.max(0, (volume + dlt) / 2.0)
-        float zone = 0.30 * atrV
-        bool churn = volume >= 1.2 * vmed and (high - low) <= 1.0 * rmed
-        array<float> lvlPx = array.new_float()
-        array<string> lvlTag = array.new_string()
-        if not na(pPoc)
-            array.push(lvlPx, pPoc)
-            array.push(lvlTag, "POC")
-        if not na(accLvl)
-            array.push(lvlPx, accLvl)
-            array.push(lvlTag, "ACCUM")
-        // Pine runs `for i = 0 to -1` once when the array is empty — guard first.
-        int lvlN = array.size(lvlPx)
-        if lvlN > 0
-            for li = 0 to lvlN - 1
-                float lp = array.get(lvlPx, li)
-                if low > lp + zone or high < lp - zone
-                    continue
-                bool holds = lp >= low - zone and lp <= high + zone
-                if not holds
-                    continue
-                bool bidAbs = churn and bidVol >= offerVol * 1.05 and low >= lp - zone
-                bool offerAbs = churn and offerVol >= bidVol * 1.05 and high <= lp + zone
-                if not bidAbs and not offerAbs
-                    continue
-                float stepK = math.max(atrV * 0.05, syminfo.mintick)
-                int key = int(math.round(lp / stepK))
-                int zi = -1
-                int azN = array.size(azPrice)
-                if azN > 0
-                    for z = 0 to azN - 1
-                        if int(math.round(array.get(azPrice, z) / stepK)) == key
-                            zi := z
-                            break
-                if zi < 0
-                    array.push(azPrice, lp)
-                    array.push(azBid, bidAbs ? bidVol : 0.0)
-                    array.push(azOffer, offerAbs ? offerVol : 0.0)
-                else
-                    if bidAbs
-                        array.set(azBid, zi, array.get(azBid, zi) + bidVol)
-                    if offerAbs
-                        array.set(azOffer, zi, array.get(azOffer, zi) + offerVol)
+    if sw > 0
+        array<float> wV = array.new_float()
+        array<float> wR = array.new_float()
+        for i = 0 to sw - 1
+            array.push(wV, array.get(sV, array.size(sV) - 1 - i))
+            array.push(wR, array.get(sR, array.size(sR) - 1 - i))
+        float vmed = f_median(wV)
+        float rmed = f_median(wR)
+        if vmed > 0 and rmed > 0
+            float bidVol = math.max(0, (volume - dlt) / 2.0)
+            float offerVol = math.max(0, (volume + dlt) / 2.0)
+            float zone = 0.30 * atrV
+            bool churn = volume >= 1.2 * vmed and (high - low) <= 1.0 * rmed
+            array<float> lvlPx = array.new_float()
+            array<string> lvlTag = array.new_string()
+            if not na(pPoc)
+                array.push(lvlPx, pPoc)
+                array.push(lvlTag, "POC")
+            if not na(accLvl)
+                array.push(lvlPx, accLvl)
+                array.push(lvlTag, "ACCUM")
+            int lvlN = array.size(lvlPx)
+            if lvlN > 0
+                for li = 0 to lvlN - 1
+                    float lp = array.get(lvlPx, li)
+                    if low > lp + zone or high < lp - zone
+                        continue
+                    bool holds = lp >= low - zone and lp <= high + zone
+                    if not holds
+                        continue
+                    bool bidAbs = churn and bidVol >= offerVol * 1.05 and low >= lp - zone
+                    bool offerAbs = churn and offerVol >= bidVol * 1.05 and high <= lp + zone
+                    if not bidAbs and not offerAbs
+                        continue
+                    float stepK = math.max(atrV * 0.05, syminfo.mintick)
+                    int key = int(math.round(lp / stepK))
+                    int zi = -1
+                    int azN = array.size(azPrice)
+                    if azN > 0
+                        for z = 0 to azN - 1
+                            if int(math.round(array.get(azPrice, z) / stepK)) == key
+                                zi := z
+                                break
+                    if zi < 0
+                        array.push(azPrice, lp)
+                        array.push(azBid, bidAbs ? bidVol : 0.0)
+                        array.push(azOffer, offerAbs ? offerVol : 0.0)
+                    else
+                        if bidAbs
+                            array.set(azBid, zi, array.get(azBid, zi) + bidVol)
+                        if offerAbs
+                            array.set(azOffer, zi, array.get(azOffer, zi) + offerVol)
 
 // ─── signal outputs ──────────────────────────────────────────────────────────
 bool sigBuy = false
@@ -951,11 +958,11 @@ if barstate.islast
             bool isBuy = array.get(bblBuy, bi)
             color bc = isBuy ? cBidAbs : cAskAbs
             int bx = array.get(bblX, bi)
-            float by = array.get(bblY, bi)
+            float bblPx = array.get(bblY, bi)
             string bt = array.get(bblTxt, bi)
-            array.push(bblLabels, label.new(bx, by, "\u25CF", style = label.style_none,
+            array.push(bblLabels, label.new(bx, bblPx, "\u25CF", style = label.style_none,
                  textcolor = bc, size = size.large))
-            array.push(bblLabels, label.new(bx, by, bt,
+            array.push(bblLabels, label.new(bx, bblPx, bt,
                  style = isBuy ? label.style_label_up : label.style_label_down,
                  color = color.new(bc, 25), textcolor = #FFFFFF, size = size.tiny))
 
@@ -1077,28 +1084,31 @@ if absorbZones and barstate.islast
     while array.size(absBoxes) > 0
         box.delete(array.pop(absBoxes))
     if not na(atrV) and atrV > 0 and array.size(azPrice) > 0
-        int sw = math.min(SIG_WIN, array.size(sV))
-        array<float> wV = array.new_float()
-        for wi = 0 to sw - 1
-            array.push(wV, array.get(sV, array.size(sV) - 1 - wi))
-        float vmed = f_median(wV)
+        int swAz = math.min(SIG_WIN, array.size(sV))
+        float vmed = na
+        if swAz > 0
+            array<float> wV = array.new_float()
+            for wi = 0 to swAz - 1
+                array.push(wV, array.get(sV, array.size(sV) - 1 - wi))
+            vmed := f_median(wV)
         float minVol = vmed > 0 ? vmed * 0.5 : 0.0
         float half = math.max(atrV * 0.04, syminfo.mintick)
         int x0 = math.max(0, bar_index - 120)
         int x1 = bar_index + 8
         int azN = array.size(azPrice)
-        for zi = 0 to azN - 1
-            float bv = array.get(azBid, zi)
-            float ov = array.get(azOffer, zi)
-            if bv + ov < minVol
-                continue
-            float lp = array.get(azPrice, zi)
-            if bv > ov
-                array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
-                     border_width = 0, bgcolor = color.new(cBidAbs, 100 - absorbOpacity)))
-            else if ov > bv
-                array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
-                     border_width = 0, bgcolor = color.new(cAskAbs, 100 - absorbOpacity)))
+        if azN > 0
+            for zi = 0 to azN - 1
+                float bv = array.get(azBid, zi)
+                float ov = array.get(azOffer, zi)
+                if bv + ov < minVol
+                    continue
+                float lp = array.get(azPrice, zi)
+                if bv > ov
+                    array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
+                         border_width = 0, bgcolor = color.new(cBidAbs, 100 - absorbOpacity)))
+                else if ov > bv
+                    array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
+                         border_width = 0, bgcolor = color.new(cAskAbs, 100 - absorbOpacity)))
 
 // ─── research UI: naked POC rays ─────────────────────────────────────────────
 var array<line> nkL = array.new<line>()
