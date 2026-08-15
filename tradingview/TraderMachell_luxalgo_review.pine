@@ -15,6 +15,12 @@ indicator("TraderMachell — Dale Volume-Profile Model", "TraderMachell", overla
 gM = "Mode"
 cleanSignals = input.bool(true, "Clean signal chart (hide research UI)", group = gM,
      tooltip = "Hide the status table and naked-POC research drawings while retaining trade visuals.")
+previewMode = input.bool(false, "Preview developing signals", group = gM,
+     tooltip = "Off = confirmed-bar signals and alerts only. On = permits developing-bar previews and repainting until the bar closes.")
+showDiagnostics = input.bool(false, "Show validation diagnostics", group = gM,
+     tooltip = "Show confirmed/replay state, delta source, GC/MGC grading guards, per-window counters, and drawing-budget checks.")
+showDeltaDisclosure = input.bool(true, "Visible delta-source disclosure", group = gM,
+     tooltip = "Show whether the active delta source is Intrabar, Range Proxy, or Unavailable.")
 visualDensity = input.string("Balanced", "Visual density",
      options = ["Minimal", "Balanced", "Detailed"], group = gM,
      tooltip = "Controls secondary profile, label, and orderflow detail.")
@@ -98,6 +104,8 @@ flexW = input.int(60, "ACCUM histogram width", minval = 10, maxval = 200,
      tooltip = "Horizontal width of the ACCUM profile.", group = gOF)
 useSecIntra = input.bool(true, "1-second intrabars on 1m charts", group = gOF,
      tooltip = "Use 1-second data on 1-minute charts when the TradingView plan provides it. Other chart timeframes automatically use the lowest practical timeframe.")
+requireRealDeltaGc1m = input.bool(true, "Guard GC/MGC 1m graded signals", group = gOF,
+     tooltip = "Block prior-POC graded signals on GC/MGC 1m charts when only the bar-range delta proxy is available. Profile math and ACCUM structure remain active.")
 
 gSig = "Signals"
 useAccum = input.bool(true, "ACCUM rotation retest", group = gSig,
@@ -142,15 +150,32 @@ cAskAbs = input.color(#FB7185, "Offer absorption", group = gV)
 float vaPct = vaIn / 100.0
 float chartSec = timeframe.in_seconds()
 float barMin = na(chartSec) ? 1.0 : math.max(1.0, chartSec / 60.0)
-bool showTbl = not cleanSignals
 bool isMinimal = visualDensity == "Minimal"
 bool isDetailed = visualDensity == "Detailed"
+bool showTbl = not cleanSignals or showDiagnostics
+bool previewEvents = previewMode
+bool confirmedEvents = barstate.isconfirmed or previewEvents
+// Presets control display density only; profile, entry, stop, and target math do
+// not depend on these clamps.
+int histRowCap = isMinimal ? 28 : isDetailed ? 72 : 48
+int accumRowCap = isMinimal ? 36 : isDetailed ? 72 : 52
+int bubbleCap = isMinimal ? 30 : isDetailed ? 80 : 50
+int ofCap = isMinimal ? 20 : isDetailed ? 40 : 30
+int sigLineCap = isMinimal ? 240 : isDetailed ? 400 : 320
+int sigBoxCap = isMinimal ? 120 : isDetailed ? 200 : 160
+int sigLabelCap = isMinimal ? 120 : isDetailed ? 200 : 160
+const int HIST_BOX_BUDGET = 150
+const int HIST_LINE_BUDGET = 20
+const int ABS_BOX_BUDGET = 40
+const int NAKED_LINE_BUDGET = 20
+const int NAKED_LABEL_BUDGET = 20
 color levelTagBg = #111827
 
 // ─── delta (intrabar when available) ──────────────────────────────────────
-// A same-timeframe request is invalid for request.security_lower_tf(). When
-// seconds data is disabled on a 1-minute chart, the arrays remain empty and
-// f_delta() safely uses the bar-range delta proxy instead.
+// A same-timeframe request is invalid for request.security_lower_tf(). The
+// bar-range fallback is safe on 1-minute charts only when the "1-second
+// intrabars on 1m charts" setting is OFF. If it is ON and the plan/feed lacks
+// seconds data, TradingView may error on load instead of returning a fallback.
 bool canUseLowerTf = not na(chartSec) and chartSec > 1.0 and
      (chartSec < 60.0 or chartSec > 60.0 or useSecIntra)
 string lowTf = not na(chartSec) and chartSec > 60.0 ? "1" : "1S"
@@ -182,6 +207,15 @@ f_delta() =>
 
 [dlt, deltaReal] = f_delta()
 float volNow = nz(volume, 0.0)
+string rootUpper = str.upper(syminfo.root)
+string tickerUpper = str.upper(syminfo.ticker)
+bool gcFamily = rootUpper == "GC" or rootUpper == "MGC" or str.contains(tickerUpper, "GC")
+bool oneMinuteChart = not na(chartSec) and chartSec == 60.0
+bool deltaProxy = not deltaReal and not canUseLowerTf
+bool deltaUnavailable = not deltaReal and canUseLowerTf
+bool gc1mProxy = gcFamily and oneMinuteChart and (deltaProxy or deltaUnavailable)
+bool gc1mGuard = requireRealDeltaGc1m and gc1mProxy
+string deltaMode = deltaReal ? "Intrabar" : deltaProxy ? "Range Proxy" : "Unavailable"
 
 // ─── NY session / window helpers ───────────────────────────────────────────
 f_sessionKey() =>
@@ -321,10 +355,10 @@ f_target(float entry, float dirn, float atr, float rr, array<float> pocArr) =>
         tp := best - dirn * tpFrontATR * atr
     else
         tp := entry + dirn * 0.8 * atr
-    // Keep the target on the intended side even when front-running a very
-    // nearby POC would otherwise move it through the entry.
-    if rr > 0 and ((tp - entry) * dirn <= 0 or math.abs(tp - entry) < 0.5 * rr)
-        tp := entry + dirn * rr
+    // Keep the structural/ATR target on the intended side. This deliberately
+    // avoids replacing it with a fixed-R exit.
+    if (tp - entry) * dirn <= 0
+        tp := entry + dirn * 0.8 * atr
     tp
 
 f_slOrd(bool long) =>
@@ -371,17 +405,19 @@ f_pushHistogram(array<box> boxes, int x0, int x1, float gLo, float st,
                     bg := color.new(#7C93A8, 100 - math.min(rowOp + 6, 90))
                 if k == pocRow
                     pocCov := v / mx
-                array.push(boxes, box.new(x0, y1, x0 + w, y0, border_width = 0, bgcolor = bg))
-                drawn += 1
-                if drawn > 55
+                if array.size(boxes) < HIST_BOX_BUDGET
+                    array.push(boxes, box.new(x0, y1, x0 + w, y0, border_width = 0, bgcolor = bg))
+                    drawn += 1
+                if drawn >= histRowCap
                     break
     pocCov
 
 f_pushBracket(array<line> lines, int x0, int x1, float vah, float val, color col) =>
-    array.push(lines, line.new(x0, vah, x1, vah, color = col, width = 1))
-    array.push(lines, line.new(x0, val, x1, val, color = col, width = 1))
-    array.push(lines, line.new(x0, vah, x0, val, color = col, width = 1))
-    array.push(lines, line.new(x1, vah, x1, val, color = col, width = 1))
+    if array.size(lines) + 4 <= HIST_LINE_BUDGET
+        array.push(lines, line.new(x0, vah, x1, vah, color = col, width = 1))
+        array.push(lines, line.new(x0, val, x1, val, color = col, width = 1))
+        array.push(lines, line.new(x0, vah, x0, val, color = col, width = 1))
+        array.push(lines, line.new(x1, vah, x1, val, color = col, width = 1))
 
 f_rowTimes(array<float> hs, array<float> ls, array<float> vs, float gLo, float st, int nrows) =>
     array<float> times = array.new_float(nrows + 90, 0.5)
@@ -442,6 +478,35 @@ const int LIQ_MIN_BARS = 120
 const int SIG_WIN = 120
 const int ATR_WIN = 420
 const int RECENT_MAX = 3100
+
+// Confirmed-only audit counters. Preview bars are intentionally excluded from
+// these counters so replay/history comparisons remain deterministic.
+var int asianBars = 0
+var int nyBars = 0
+var int asianSignals = 0
+var int nySignals = 0
+var int realDeltaBars = 0
+var int proxyDeltaBars = 0
+bool inAsianNow = f_inAsianWindow()
+bool inNyNow = f_inNyWindow()
+
+if newSess
+    asianBars := 0
+    nyBars := 0
+    asianSignals := 0
+    nySignals := 0
+    realDeltaBars := 0
+    proxyDeltaBars := 0
+
+if barstate.isconfirmed
+    if inAsianNow
+        asianBars += 1
+    if inNyNow
+        nyBars += 1
+    if deltaReal
+        realDeltaBars += 1
+    else
+        proxyDeltaBars += 1
 
 if newSess and array.size(sL) > 5
     [p1, a1, v1, g1, s1, b1] = f_profile(sH, sL, sV, rows)
@@ -586,7 +651,7 @@ if newSess
     array.clear(azOffer)
 
 // ─── ACCUM rotation detect ─────────────────────────────────────────────────
-if not na(atrV) and atrV > 0 and bar_index > rotBars + 5 and barstate.isconfirmed
+if not na(atrV) and atrV > 0 and bar_index > rotBars + 5 and confirmedEvents
     int rn = array.size(rH)
     int L = rotBars
     if rn >= L + 10
@@ -740,9 +805,9 @@ int iBar = array.size(sV) - 1
 bool inWin = f_inTradeWindow()
 float px = close
 
-if not na(atrV) and atrV > 0 and barstate.isconfirmed
+if not na(atrV) and atrV > 0 and confirmedEvents
     // --- prior-POC machine ---
-    if useStack and not na(pPoc) and prevLiquid and not P_done and array.size(sV) >= 5
+    if useStack and not gc1mGuard and not na(pPoc) and prevLiquid and not P_done and array.size(sV) >= 5
         float lvl = pPoc
         bool above = px > lvl
         if P_touchedAt < 0
@@ -806,14 +871,14 @@ if not na(atrV) and atrV > 0 and barstate.isconfirmed
                         if ok
                             float dirn = longSide ? 1.0 : -1.0
                             float rr = math.abs(entry - sl)
-                            float tp = f_target(entry, dirn, atrV, rr, priorPocs)
+                            float tp = f_target(lvl, dirn, atrV, rr, priorPocs)
                             P_fired := true
                             eLong := longSide
                             ePx := entry
                             eSl := sl
                             eTp := tp
                             eBar := bar_index
-                            eKind := "STACK"
+                            eKind := deltaProxy ? "STACK Δproxy" : deltaUnavailable ? "STACK Δunavail" : "STACK"
                             sigBuy := longSide
                             sigSell := not longSide
                             status := (longSide ? "BUY" : "SELL") + " prior-POC stack"
@@ -847,6 +912,12 @@ if not na(atrV) and atrV > 0 and barstate.isconfirmed
                         sigSell := not longAcc
                         status := (longAcc ? "BUY" : "SELL") + " ACCUM retest"
 
+if barstate.isconfirmed and (sigBuy or sigSell)
+    if inAsianNow
+        asianSignals += 1
+    if inNyNow
+        nySignals += 1
+
 // ─── orderflow: wick absorption bubbles + delta marks ──────────────────────
 var array<int> bblX = array.new_int()
 var array<float> bblY = array.new_float()
@@ -857,7 +928,7 @@ var array<float> ofY = array.new_float()
 var array<bool> ofDn = array.new_bool()
 bool bubbleBar = false
 
-if (showBubbles or showOFMarks) and barstate.isconfirmed and array.size(sV) >= 5
+if (showBubbles or showOFMarks) and confirmedEvents and array.size(sV) >= 5
     int bl = math.min(bubbleLook, array.size(sV))
     if bl > 0
         array<float> wV = array.new_float()
@@ -883,23 +954,23 @@ if (showBubbles or showOFMarks) and barstate.isconfirmed and array.size(sV) >= 5
                     array.push(bblX, bar_index)
                     array.push(bblY, low)
                     array.push(bblBuy, true)
-                    array.push(bblTxt, "BID ABSORB")
+                    array.push(bblTxt, deltaReal ? "BID ABSORB" : "BID ABSORB (PROXY)")
                 if upperW / rng >= wickMinPct and dlt > 0
                     bubbleBar := true
                     array.push(bblX, bar_index)
                     array.push(bblY, high)
                     array.push(bblBuy, false)
-                    array.push(bblTxt, "ASK ABSORB")
+                    array.push(bblTxt, deltaReal ? "ASK ABSORB" : "ASK ABSORB (PROXY)")
             if showOFMarks and not na(d90) and math.abs(dlt) >= d90 and volNow >= 1.5 * vmed
                 array.push(ofX, bar_index)
                 array.push(ofY, close)
                 array.push(ofDn, dlt < 0)
-    while array.size(bblX) > 80
+    while array.size(bblX) > bubbleCap
         array.shift(bblX)
         array.shift(bblY)
         array.shift(bblBuy)
         array.shift(bblTxt)
-    while array.size(ofX) > 40
+    while array.size(ofX) > ofCap
         array.shift(ofX)
         array.shift(ofY)
         array.shift(ofDn)
@@ -909,6 +980,8 @@ if na(pPoc)
     status := "waiting: no prior-session profile yet"
 else if not prevLiquid
     status := "stand down: prior session too thin"
+else if gc1mGuard
+    status := "GC/MGC 1m guard: real delta required for STACK"
 else if P_done and P_fired
     status := "signal complete for the session"
 else if P_done and P_touchedAt >= 0
@@ -1012,6 +1085,7 @@ if barstate.islast
             array.push(histLabels, label.new(ax1 + 2, accLvl, "ACCUM  " + str.tostring(accLvl, format.mintick),
                  style = label.style_label_left, color = levelTagBg, textcolor = cAcc, size = size.tiny))
             int abN = array.size(accBins)
+            int drawnA = 0
             if abN > 0
                 for k = 0 to abN - 1
                     float vv = array.get(accBins, k)
@@ -1021,6 +1095,9 @@ if barstate.islast
                             float y0 = accGrid + k * accStep
                             array.push(accumBoxes, box.new(ax0, y0 + accStep, ax0 + w, y0,
                                  border_width = 0, bgcolor = color.new(cAcc, vv >= mxA * 0.98 ? 25 : 65)))
+                            drawnA += 1
+                            if drawnA >= accumRowCap
+                                break
 
     int bN = array.size(bblX)
     if showBubbles and bN > 0
@@ -1036,7 +1113,7 @@ if barstate.islast
                  textcolor = color.new(bc, 5), size = isDetailed ? size.large : size.normal,
                  tooltip = bt + "  " + str.tostring(bblPx, format.mintick)))
             if showBubbleText and not isMinimal
-                array.push(bblLabels, label.new(bx, bblPx, isBuy ? "BID ABS" : "ASK ABS",
+                array.push(bblLabels, label.new(bx, bblPx, isBuy ? (str.contains(bt, "PROXY") ? "BID ABS*" : "BID ABS") : (str.contains(bt, "PROXY") ? "ASK ABS*" : "ASK ABS"),
                      style = isBuy ? label.style_label_up : label.style_label_down,
                      color = levelTagBg, textcolor = bc, size = size.tiny))
 
@@ -1051,7 +1128,7 @@ if barstate.islast
             string ot = dn ? "▼" : "▲"
             array.push(ofLabels, label.new(ox, array.get(ofY, oi), ot,
                  style = label.style_none, textcolor = color.new(oc, 25), size = size.tiny,
-                 tooltip = dn ? "Strong negative delta" : "Strong positive delta"))
+                 tooltip = dn ? (deltaReal ? "Strong negative delta" : "Strong negative delta proxy") : (deltaReal ? "Strong positive delta" : "Strong positive delta proxy")))
 
 // ─── signal graphics ───────────────────────────────────────────────────────
 var array<line> sigLines = array.new<line>()
@@ -1085,22 +1162,30 @@ if barstate.islast
     lblDPoc := na
     lblDVah := na
     lblDVal := na
-    int lx = bar_index + 10
+    int prevLx = bar_index + 8
+    int devLx = bar_index + 20
+    float labelGap = math.max(nz(atrV, syminfo.mintick) * 0.12, syminfo.mintick * 4.0)
+    float prevPocY = pPoc
+    float prevVahY = not na(pVah) and not na(prevPocY) ? math.max(pVah, prevPocY + labelGap) : pVah
+    float prevValY = not na(pVal) and not na(prevPocY) ? math.min(pVal, prevPocY - labelGap) : pVal
+    float devPocY = dPoc
+    float devVahY = not na(dVah) and not na(devPocY) ? math.max(dVah, devPocY + labelGap) : dVah
+    float devValY = not na(dVal) and not na(devPocY) ? math.min(dVal, devPocY - labelGap) : dVal
     if showLevelLabels and showLvl and showPrev and not na(pPoc)
-        lblPoc := label.new(lx, pPoc, "PREV POC  " + str.tostring(pPoc, format.mintick),
+        lblPoc := label.new(prevLx, prevPocY, "PREV POC  " + str.tostring(pPoc, format.mintick),
              style = label.style_label_left, color = levelTagBg, textcolor = cPoc, size = size.small)
         if not isMinimal
-            lblVah := label.new(lx, pVah, "PREV VAH  " + str.tostring(pVah, format.mintick),
+            lblVah := label.new(prevLx, prevVahY, "PREV VAH  " + str.tostring(pVah, format.mintick),
                  style = label.style_label_left, color = levelTagBg, textcolor = cVa, size = size.tiny)
-            lblVal := label.new(lx, pVal, "PREV VAL  " + str.tostring(pVal, format.mintick),
+            lblVal := label.new(prevLx, prevValY, "PREV VAL  " + str.tostring(pVal, format.mintick),
                  style = label.style_label_left, color = levelTagBg, textcolor = cVa, size = size.tiny)
     if showLevelLabels and showDevLines and not na(dPoc)
-        lblDPoc := label.new(lx, dPoc, "DEV POC  " + str.tostring(dPoc, format.mintick),
+        lblDPoc := label.new(devLx, devPocY, "DEV POC  " + str.tostring(dPoc, format.mintick),
              style = label.style_label_left, color = levelTagBg, textcolor = cDev, size = size.small)
         if isDetailed
-            lblDVah := label.new(lx, dVah, "DEV VAH  " + str.tostring(dVah, format.mintick),
+            lblDVah := label.new(devLx, devVahY, "DEV VAH  " + str.tostring(dVah, format.mintick),
                  style = label.style_label_left, color = levelTagBg, textcolor = color.new(cDev, 20), size = size.tiny)
-            lblDVal := label.new(lx, dVal, "DEV VAL  " + str.tostring(dVal, format.mintick),
+            lblDVal := label.new(devLx, devValY, "DEV VAL  " + str.tostring(dVal, format.mintick),
                  style = label.style_label_left, color = levelTagBg, textcolor = color.new(cDev, 20), size = size.tiny)
 
 if sigBuy or sigSell
@@ -1112,7 +1197,7 @@ if sigBuy or sigSell
     float risk = math.abs(ePx - eSl)
     float toTp = math.abs(eTp - ePx)
     int x0 = bar_index
-    int x1 = bar_index + 12
+    int x1 = bar_index + 14
     array.push(sigLines, line.new(x0, ePx, x1, ePx, color = color.new(#78909C, 30), width = 1))
     array.push(sigLines, line.new(x0, eSl, x1, eSl, color = cSl, width = 2, style = line.style_dashed))
     array.push(sigLines, line.new(x0, eTp, x1, eTp, color = cTp, width = 2, style = line.style_dotted))
@@ -1138,15 +1223,15 @@ if sigBuy or sigSell
              "R " + str.tostring(risk, format.mintick) + "  to TP " + str.tostring(toTp, format.mintick),
              style = label.style_label_left, color = levelTagBg, textcolor = #94A3B8, size = size.tiny))
         lastSigLabels := 6
-    while array.size(sigLines) > 400
+    while array.size(sigLines) > sigLineCap
         line.delete(array.shift(sigLines))
-    while array.size(sigBoxes) > 200
+    while array.size(sigBoxes) > sigBoxCap
         box.delete(array.shift(sigBoxes))
-    while array.size(sigLabels) > 200
+    while array.size(sigLabels) > sigLabelCap
         label.delete(array.shift(sigLabels))
 
 if barstate.islast and not na(eBar)
-    int x1 = bar_index + 12
+    int x1 = bar_index + 14
     int nl = array.size(sigLines)
     if nl >= 3
         line.set_x2(array.get(sigLines, nl - 3), x1)
@@ -1189,12 +1274,13 @@ if barstate.islast
                 if bv + ov < minVol
                     continue
                 float lp = array.get(azPrice, zi)
-                if bv > ov
-                    array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
-                         border_width = 0, bgcolor = color.new(cBidAbs, 100 - absorbOpacity)))
-                else if ov > bv
-                    array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
-                         border_width = 0, bgcolor = color.new(cAskAbs, 100 - absorbOpacity)))
+                if array.size(absBoxes) < ABS_BOX_BUDGET
+                    if bv > ov
+                        array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
+                             border_width = 0, bgcolor = color.new(cBidAbs, 100 - absorbOpacity)))
+                    else if ov > bv
+                        array.push(absBoxes, box.new(x0, lp + half, x1, lp - half,
+                             border_width = 0, bgcolor = color.new(cAskAbs, 100 - absorbOpacity)))
 
 // ─── research UI: naked POC rays ────────────────────────────────────────────
 var array<line> nkL = array.new<line>()
@@ -1215,8 +1301,16 @@ if not cleanSignals and barstate.islast
             array.push(nkT, label.new(bar_index + 15, lv, "NPOC " + str.tostring(lv, format.mintick),
                  style = label.style_label_left, color = color.new(#12161C, 20), textcolor = cNak, size = size.tiny))
 
-// ─── status panel (research mode) ───────────────────────────────────────────
-var table t = table.new(position.top_left, 2, 6, bgcolor = color.new(#0E1218, 8),
+// ─── status and validation panel ───────────────────────────────────────────
+int usedLines = array.size(sigLines) + array.size(histLines) + array.size(nkL)
+int usedLabels = array.size(sigLabels) + array.size(histLabels) + array.size(bblLabels) + array.size(ofLabels) + array.size(nkT) +
+     (not na(lblPoc) ? 1 : 0) + (not na(lblVah) ? 1 : 0) + (not na(lblVal) ? 1 : 0) +
+     (not na(lblDPoc) ? 1 : 0) + (not na(lblDVah) ? 1 : 0) + (not na(lblDVal) ? 1 : 0)
+int usedBoxes = array.size(sigBoxes) + array.size(histBoxes) + array.size(accumBoxes) + array.size(absBoxes)
+bool budgetOk = usedLines <= 500 and usedLabels <= 500 and usedBoxes <= 500
+string replayState = barstate.isrealtime ? (previewMode ? "LIVE / PREVIEW" : "LIVE / CONFIRMED") : "HISTORY / REPLAY"
+string guardState = gc1mProxy ? (gc1mGuard ? "GC/MGC 1m BLOCKED" : "GC/MGC 1m PROXY") : "NOT GC/MGC 1m"
+var table t = table.new(position.top_left, 2, 10, bgcolor = color.new(#0E1218, 8),
      frame_color = color.new(#394452, 30), frame_width = 1)
 
 f_kv(int r, string k, string v, color c) =>
@@ -1237,8 +1331,24 @@ if showTbl and barstate.islast
          "   n=" + str.tostring(array.size(nakeds)), cAcc)
     f_kv(4, "ATR / last R", (na(atrV) ? "—" : str.tostring(atrV, format.mintick)) +
          (na(eSl) or na(ePx) ? "" : "   R=" + str.tostring(math.abs(ePx - eSl), format.mintick)), #7C8B9C)
-    f_kv(5, "Layers", (showPrevHist ? "prev-hist " : "") + (showDevHist ? "dev-hist " : "") +
-         (showBubbles ? "bubbles " : "") + (showOFMarks ? "orderflow" : ""), #7C8B9C)
+    f_kv(5, "Delta source", deltaMode + (deltaReal ? "" : " — disclosure"), deltaReal ? cDev : cSell)
+    f_kv(6, "GC/MGC grading", guardState, gc1mGuard ? cSell : cDev)
+    f_kv(7, "Window bars / signals", "AS " + str.tostring(asianBars) + "/" + str.tostring(asianSignals) +
+         "  NY " + str.tostring(nyBars) + "/" + str.tostring(nySignals), #7C8B9C)
+    f_kv(8, "Replay / budget", replayState + "  " + (budgetOk ? "BUDGET OK" : "BUDGET CHECK"), budgetOk ? cDev : cSell)
+    f_kv(9, "Layers / delta bars", (showPrevHist ? "prev " : "") + (showDevHist ? "dev " : "") +
+         (showBubbles ? "bubbles " : "") + (showOFMarks ? "OF" : "") +
+         "  real=" + str.tostring(realDeltaBars) + " proxy=" + str.tostring(proxyDeltaBars), #7C8B9C)
+
+// A status-line disclosure remains available even when the research panel is hidden.
+plot(deltaReal ? 1.0 : 0.0, "Delta source: 1 intrabar / 0 non-intrabar", display = display.status_line)
+
+var table deltaTable = table.new(position.top_right, 1, 1, bgcolor = color.new(#0E1218, 12),
+     frame_color = color.new(#394452, 35), frame_width = 1)
+if barstate.islast
+    table.cell(deltaTable, 0, 0, showDeltaDisclosure ? "Δ " + deltaMode : "",
+         text_size = size.small, text_color = deltaReal ? cDev : deltaUnavailable ? cSell : cVa,
+         text_halign = text.align_center)
 
 alertcondition(sigBuy, "TraderMachell BUY",
      "TraderMachell BUY — check chart for ENTRY / STOP / LIMIT bracket")
