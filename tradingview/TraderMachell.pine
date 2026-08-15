@@ -83,12 +83,9 @@ cTp   = input.color(#26A17B, "Target", group = gV)
 cBidAbs = input.color(#26A17B, "Bid absorption", group = gV)
 cAskAbs = input.color(#E05260, "Offer absorption", group = gV)
 
-// Pine reserved keywords — never use as variable names: by, to, in, and, or, not, if,
-// for, while, break, continue, switch, var, const, export, import, type, enum, matrix.
-
-// Guard empty-array loops (Pine runs `for i = 0 to -1` once).
-f_loopEnd(int n) =>
-    math.max(n - 1, -1)
+// Pine reserved — never use as names: by, to, in, and, or, not, if, for, while,
+// break, continue, switch, var, const, export, import, type, enum, matrix, range, text.
+vaPct = vaIn / 100.0
 barMin = math.max(1, timeframe.in_seconds() / 60)
 showTbl = not cleanSignals
 
@@ -101,7 +98,7 @@ f_delta() =>
     bool real = false
     if array.size(lV) > 0
         real := true
-        for i = 0 to f_loopEnd(array.size(lV))
+        for i = 0 to array.size(lV) - 1
             float v = array.get(lV, i)
             float o = array.get(lO, i)
             float c = array.get(lC, i)
@@ -210,31 +207,28 @@ f_pctile(a, p) =>
     r
 
 f_stopBehindLVN(val, vah, gridLo, step, bins, forLong, atr) =>
-    float sl = na
-    float pv = array.max(bins)
+    float sl = forLong ? val - 0.60 * atr : vah + 0.60 * atr
     int nb = array.size(bins)
-    if forLong
-        int k0 = math.max(0, int((val - gridLo) / step))
-        for i = 0 to 60
-            int k = k0 - 1 - i
-            if k < 0
-                break
-            if array.get(bins, k) < 0.30 * pv
-                sl := gridLo + k * step - 0.10 * atr
-                break
-        if na(sl)
-            sl := val - 0.60 * atr
-    else
-        int k0 = math.min(nb - 1, int((vah - gridLo) / step))
-        for i = 0 to 60
-            int k = k0 + i
-            if k >= nb
-                break
-            if array.get(bins, k) < 0.30 * pv
-                sl := gridLo + (k + 1) * step + 0.10 * atr
-                break
-        if na(sl)
-            sl := vah + 0.60 * atr
+    if nb > 0
+        float pv = array.max(bins)
+        if forLong
+            int k0 = math.max(0, int((val - gridLo) / step))
+            for i = 0 to 60
+                int k = k0 - 1 - i
+                if k < 0
+                    break
+                if array.get(bins, k) < 0.30 * pv
+                    sl := gridLo + k * step - 0.10 * atr
+                    break
+        else
+            int k0 = math.min(nb - 1, int((vah - gridLo) / step))
+            for i = 0 to 60
+                int k = k0 + i
+                if k >= nb
+                    break
+                if array.get(bins, k) < 0.30 * pv
+                    sl := gridLo + (k + 1) * step + 0.10 * atr
+                    break
     sl
 
 f_target(entry, dirn, atr, rr, pocArr) =>
@@ -242,8 +236,8 @@ f_target(entry, dirn, atr, rr, pocArr) =>
     float best = na
     int n = array.size(pocArr)
     if n > 0
-        int start = math.max(0, n - priorDays)
-        for i = start to n - 1
+        int fromIdx = math.max(0, n - priorDays)
+        for i = fromIdx to n - 1
             float p = array.get(pocArr, i)
             if (p - entry) * dirn > 0.05 * atr
                 if na(best) or math.abs(p - entry) < math.abs(best - entry)
@@ -268,42 +262,43 @@ f_entryOrd(long, kind) =>
 // Blue→Red time ramp (MP55396 semantics, display-only)
 f_rampColor(float t) =>
     float T = math.max(0.0, math.min(1.0, t))
-    color.rgb(math.round(255 * T), 0, math.round(255 * (1.0 - T)))
+    color.rgb(int(math.round(255 * T)), 0, int(math.round(255 * (1.0 - T))))
 
 // Draw histogram rows into box array; returns POC row coverage for prominence
 f_pushHistogram(array<box> boxes, int x0, int x1, float gLo, float st, array<float> bins,
      float poc, float vah, float val, bool useRamp, int rowOp, array<float> barTimes) =>
-    float mx = array.max(bins)
     int nb = array.size(bins)
-    int span = math.max(1, x1 - x0)
-    int pocRow = array.indexof(bins, mx)
     float pocCov = 0.0
-    if nb > 0 and mx > 0
-        int drawn = 0
-        for k = 0 to nb - 1
-            float v = array.get(bins, k)
-            if v <= mx * 0.03
-                continue
-            float y0 = gLo + k * st
-            float y1 = y0 + st
-            int w = math.max(1, int(span * v / mx * 0.85))
-            float t = 0.5
-            if useRamp
-                if array.size(barTimes) > 0 and k < array.size(barTimes)
-                    t := array.get(barTimes, k)
-                else if nb > 0
-                    t := k / nb
-            color bg = useRamp ? color.new(f_rampColor(t), 100 - rowOp) :
-                 color.new(#5A6E82, 100 - rowOp)
-            bool inVa = y0 + st * 0.5 >= val and y0 + st * 0.5 <= vah
-            if inVa
-                bg := color.new(#7C93A8, 100 - math.min(rowOp + 6, 90))
-            if k == pocRow
-                pocCov := v / mx
-            array.push(boxes, box.new(x0, y1, x0 + w, y0, border_width = 0, bgcolor = bg))
-            drawn += 1
-            if drawn > 55
-                break
+    if nb > 0 and st > 0
+        float mx = array.max(bins)
+        int span = math.max(1, x1 - x0)
+        int pocRow = array.indexof(bins, mx)
+        if mx > 0
+            int drawn = 0
+            for k = 0 to nb - 1
+                float v = array.get(bins, k)
+                if v <= mx * 0.03
+                    continue
+                float y0 = gLo + k * st
+                float y1 = y0 + st
+                int w = math.max(1, int(span * v / mx * 0.85))
+                float tFrac = 0.5
+                if useRamp
+                    if array.size(barTimes) > 0 and k < array.size(barTimes)
+                        tFrac := array.get(barTimes, k)
+                    else
+                        tFrac := k / nb
+                color bg = useRamp ? color.new(f_rampColor(tFrac), 100 - rowOp) :
+                     color.new(#5A6E82, 100 - rowOp)
+                bool inVa = y0 + st * 0.5 >= val and y0 + st * 0.5 <= vah
+                if inVa
+                    bg := color.new(#7C93A8, 100 - math.min(rowOp + 6, 90))
+                if k == pocRow
+                    pocCov := v / mx
+                array.push(boxes, box.new(x0, y1, x0 + w, y0, border_width = 0, bgcolor = bg))
+                drawn += 1
+                if drawn > 55
+                    break
     pocCov
 
 f_pushBracket(array<line> lines, int x0, int x1, float vah, float val, color col) =>
@@ -319,10 +314,10 @@ f_rowTimes(array<float> hs, array<float> ls, array<float> vs, float gLo, float s
     if n > 1
         for i = 0 to n - 1
             int a = math.max(int((array.get(ls, i) - gLo) / st), 0)
-            int z = math.max(a, int((array.get(hs, i) - gLo) / st))
+            int z = math.min(array.size(times) - 1, math.max(a, int((array.get(hs, i) - gLo) / st)))
             float tf = i / (n - 1)
-            for k = a to z
-                if k < array.size(times)
+            if a <= z
+                for k = a to z
                     array.set(times, k, tf)
     times
 
@@ -435,7 +430,7 @@ if showNPOC and array.size(nakeds) > 0
             if low <= lv and high >= lv
                 array.remove(nakeds, i)
 
-if showDevLines and sCount >= 10
+if (showDevLines or showDevHist or showDevVA) and sCount >= 10 and (bar_index % 5 == 0 or barstate.islast)
     [p2, a2, v2, g2, s2, b2] = f_profile(sH, sL, sV, rows)
     dPoc := p2
     dVah := a2
@@ -524,7 +519,8 @@ if not na(atrV) and atrV > 0 and bar_index > rotBars + 5 and barstate.isconfirme
         float brk = rotBrkA * atrV
         int e = rn - 1 - L
         bool found = false
-        while e >= L and not found
+        int scans = 0
+        while e >= L and not found and scans < 40
             float wHi = -1e9
             float wLo = 1e9
             for i = e - L + 1 to e
@@ -596,6 +592,7 @@ if not na(atrV) and atrV > 0 and bar_index > rotBars + 5 and barstate.isconfirme
                         accMaxD := 0.0
                         found := true
             e := s - 5
+            scans += 1
 
 // Track absorption at levels
 if not na(atrV) and atrV > 0 and array.size(sV) >= 5
@@ -989,12 +986,18 @@ var label lblDVah = na
 var label lblDVal = na
 
 if barstate.islast
-    label.delete(lblPoc)
-    label.delete(lblVah)
-    label.delete(lblVal)
-    label.delete(lblDPoc)
-    label.delete(lblDVah)
-    label.delete(lblDVal)
+    if not na(lblPoc)
+        label.delete(lblPoc)
+    if not na(lblVah)
+        label.delete(lblVah)
+    if not na(lblVal)
+        label.delete(lblVal)
+    if not na(lblDPoc)
+        label.delete(lblDPoc)
+    if not na(lblDVah)
+        label.delete(lblDVah)
+    if not na(lblDVal)
+        label.delete(lblDVal)
     lblPoc := na
     lblVah := na
     lblVal := na
