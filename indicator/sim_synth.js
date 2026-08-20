@@ -330,10 +330,11 @@ if (aln.length) {
     'part2: Text items missing style');
   const lab2 = items2.filter(x => x.tag === 'Text' && !x.origin &&
     x.textAlignment === 'rightMiddle' && x.point.x.v === (n - 1) + 4);
-  // 14 labels in the GLOBAL right-edge column (per-session key values
+  // 18 labels in the GLOBAL right-edge column (per-session key values
   // anchor at their own profile edges and are excluded by the x filter):
-  // PREV POC/VAH/VAL, 2 NPOC, HTF POC/VAH/VAL, LEG, TP, SL + dPOC/dVAH/dVAL
-  check(lab2.length === 14, 'part2: expected 14 labels, got ' + lab2.length);
+  // PREV POC/VAH/VAL, 2 NPOC, HTF POC/VAH/VAL, LEG, TP, SL, dPOC/dVAH/dVAL
+  // + 4 session-leg fib levels (v13, default ON)
+  check(lab2.length === 18, 'part2: expected 18 labels, got ' + lab2.length);
   const slots2 = new Set();
   let stacked = 0;
   for (const t of lab2) {
@@ -1821,6 +1822,51 @@ if (aln.length) {
   const keysOff = itOff.map(x => x.key).sort().join();
   check(keysOn === keysOff, 'part22: not purely additive (other layers changed)');
   console.log('part22 edge profile:        px-only X, pinned, session-keyed, duTime-immune, additive OK');
+}
+
+// -- part 23: fib retracements of the session leg (UNTESTED entry aid).
+// Exact arithmetic against independently-scanned session extremes,
+// anchor-free level form, leg direction by most-recent extreme, NO
+// coarse-bin star (session extremes are exact at any timeframe --
+// only profile-binned levels earn the star), toggleable, and the
+// approximate-POC confluence suffix fires when fabricated. --
+{
+  const R23 = runModel('A', 400, { htfSessions: 20 });   // fibs default ON
+  const inst = R23.inst;
+  const iLast = n - 1;
+  const it23 = R23.lastResult.graphics.items;
+  // independent extremes scan
+  let hi23 = -Infinity, lo23 = Infinity, hiT23 = 0, loT23 = 0;
+  for (const b of inst.core.dayBars) {
+    if (b.h > hi23) { hi23 = b.h; hiT23 = b.tMs; }
+    if (b.l < lo23) { lo23 = b.l; loT23 = b.tMs; }
+  }
+  const up23 = hiT23 >= loT23;
+  const ratios23 = [0.382, 0.5, 0.618, 0.786];
+  for (let fi = 0; fi < 4; fi++) {
+    const want = up23 ? hi23 - ratios23[fi] * (hi23 - lo23)
+      : lo23 + ratios23[fi] * (hi23 - lo23);
+    const ln = it23.find(x => x.key === 'fibL' + fi);
+    check(!!ln && ln.lines[0].infiniteStart === true,
+      'part23: fib level not in the anchor-free form: fibL' + fi);
+    if (ln) check(Math.abs(ln.lines[0].a.y.v - want) < 1e-9,
+      `part23: fibL${fi} at ${ln.lines[0].a.y.v} != ${want}`);
+    const tx = it23.find(x => x.key === 'fibT' + fi);
+    check(!!tx && tx.text.indexOf('FIB ') === 0 && tx.text.indexOf('*') < 0,
+      'part23: fib label missing or falsely starred: ' + (tx ? tx.text : '-'));
+  }
+  // confluence suffix: put the prior POC exactly on the 61.8 level
+  const lvl618 = up23 ? hi23 - 0.618 * (hi23 - lo23) : lo23 + 0.618 * (hi23 - lo23);
+  inst.lastOut.prev = Object.assign({}, inst.lastOut.prev, { poc: lvl618 });
+  const it23b = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  const t618 = it23b.find(x => x.key === 'fibT2');
+  check(!!t618 && t618.text.indexOf('\u2248POC') >= 0,
+    'part23: POC confluence suffix missing: ' + (t618 ? t618.text : '-'));
+  // toggle off removes the family
+  inst.props = Object.assign({}, inst.props, { fibs: '0' });
+  const it23c = inst.buildItems(entity(bars[n - 1], true, true), iLast, null);
+  check(it23c.every(x => !x.key.startsWith('fib')), 'part23: toggle off failed');
+  console.log('part23 fib assist:          arithmetic, anchor-free, unstarred, confluence, toggle OK');
 }
 
 const kindsOf = c => {
